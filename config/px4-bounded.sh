@@ -18,15 +18,19 @@ _px4_call() {
     "$@" &
     _pid=$!
     _hung=0
-    _ticks=0
+    _waited_ms=0
+    _nap_ms=5
+    # A normal call returns in ~5 ms, so poll with exponential backoff: a fast
+    # call costs one short nap, a hung one settles at 500 ms polls.
     while kill -0 "$_pid" 2>/dev/null; do
-      if [ "$_ticks" -ge $((PX4_CALL_TIMEOUT_S * 5)) ]; then
+      if [ "$_waited_ms" -ge $((PX4_CALL_TIMEOUT_S * 1000)) ]; then
         _hung=1
         kill "$_pid" 2>/dev/null
         break
       fi
-      sleep 0.2
-      _ticks=$((_ticks + 1))
+      sleep "$(printf '0.%03d' "$_nap_ms")"
+      _waited_ms=$((_waited_ms + _nap_ms))
+      [ "$_nap_ms" -ge 500 ] || _nap_ms=$((_nap_ms * 2))
     done
     wait "$_pid" 2>/dev/null
     _rc=$?

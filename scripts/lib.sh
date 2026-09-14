@@ -284,7 +284,7 @@ wait_for_px4_startup() {
 # stops growing while the fleet moves on is restarted rather than waited on.
 wait_for_fleet_px4_startup() {
   local timeout="${1:?usage: wait_for_fleet_px4_startup <timeout>}"
-  local stall="${SIM_PX4_STALL_SECONDS:-45}" attempts="${SIM_PX4_BOOT_ATTEMPTS:-3}"
+  local stall="${SIM_PX4_STALL_SECONDS:-120}" attempts="${SIM_PX4_BOOT_ATTEMPTS:-3}"
   local deadline="$((SECONDS + timeout))" next=0 previous=-1
   local -a pending done_state last_size last_change tries
   local index log size ready list
@@ -301,6 +301,19 @@ wait_for_fleet_px4_startup() {
         done_state[index]=1; ready="$((ready + 1))"; continue
       fi
       pending+=("px4_$index")
+      # rcS reported failure (the bounded-call wrapper aborts it after three
+      # hangs): PX4 is exiting and Process Compose relaunches it. Count the
+      # attempt; do not wait for the silence fallback.
+      if grep -qF "Startup script returned with return value" "$log" 2>/dev/null; then
+        (( tries[index] < attempts )) || die "PX4 px4_$index failed startup $attempts times"
+        printf '[PX4] px4_%s startup script failed; relaunching (attempt %s/%s)\n' \
+          "$index" "$((tries[index] + 1))" "$attempts"
+        cp "$log" "$SIM_RUNTIME_DIR/failed-px4-$index-attempt${tries[index]}.log" 2>/dev/null || true
+        tries[index]="$(( tries[index] + 1 ))"
+        last_size[index]=-1; last_change[index]="$SECONDS"
+        while grep -qF "Startup script returned with return value" "$log" 2>/dev/null; do sleep 1; done
+        continue
+      fi
       size="$(wc -c <"$log" 2>/dev/null | tr -d '[:space:]')"
       [[ -n "$size" ]] || size=0
       if [[ "$size" != "${last_size[index]}" ]]; then
