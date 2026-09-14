@@ -11,6 +11,7 @@
 
 PX4_CALL_TIMEOUT_S=${PX4_CALL_TIMEOUT_S:-30}
 PX4_CALL_ATTEMPTS=${PX4_CALL_ATTEMPTS:-3}
+PX4_CALL_NUDGE_MS=${PX4_CALL_NUDGE_MS:-2000}
 
 _px4_call() {
   _attempt=1
@@ -20,9 +21,18 @@ _px4_call() {
     _hung=0
     _waited_ms=0
     _nap_ms=5
+    _nudge_pid=
     # A normal call returns in ~5 ms, so poll with exponential backoff: a fast
     # call costs one short nap, a hung one settles at 500 ms polls.
     while kill -0 "$_pid" 2>/dev/null; do
+      # The daemon's poll() occasionally misses the wakeup for a pending
+      # connection, leaving the client in read() with nobody accepting. Any new
+      # connection wakes it, and the pending one is served first, so open one.
+      if [ -z "$_nudge_pid" ] && [ "$_waited_ms" -ge "$PX4_CALL_NUDGE_MS" ]; then
+        echo "px4-bounded: '$*' silent ${PX4_CALL_NUDGE_MS}ms; nudging daemon" >&2
+        px4-param --instance "$px4_instance" show SYS_AUTOSTART >/dev/null 2>&1 &
+        _nudge_pid=$!
+      fi
       if [ "$_waited_ms" -ge $((PX4_CALL_TIMEOUT_S * 1000)) ]; then
         _hung=1
         kill "$_pid" 2>/dev/null
@@ -34,6 +44,7 @@ _px4_call() {
     done
     wait "$_pid" 2>/dev/null
     _rc=$?
+    if [ -n "$_nudge_pid" ]; then kill "$_nudge_pid" 2>/dev/null; wait "$_nudge_pid" 2>/dev/null; fi
     # A real result, including a legitimate non-zero (param compare/greater
     # return 1 to mean "false" inside rcS conditionals): pass it straight through.
     [ "$_hung" -eq 1 ] || return "$_rc"

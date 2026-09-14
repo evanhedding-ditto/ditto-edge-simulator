@@ -17,7 +17,7 @@ wait_for_fleet_edge_sockets
 wait_for_fleet_xrce_listeners
 stagger_px4_boot "$index"
 rootfs="$(node_dir "px4_$index")/rootfs"
-if [[ ! -f "$rootfs/.ditto-viewer-profile-v18" ]]; then
+if [[ ! -f "$rootfs/.ditto-viewer-profile-v19" ]]; then
   [[ ! -e "$rootfs/etc" ]] || die "stale PX4 rootfs; restart the simulator"
   mkdir -p "$rootfs"
   cp -cR "$source_data" "$rootfs/etc"
@@ -50,7 +50,7 @@ true' "$mavlink"
   # XRCE clients during fleet boot.
   sed -i '' 's/^uxrce_dds_client start -t udp -p \$uxrce_dds_port \$uxrce_dds_ns$/[ "$PX4_DITTO_UXRCE" = "1" ] \&\& uxrce_dds_client start -t udp -p $uxrce_dds_port $uxrce_dds_ns/' "$rootfs/etc/init.d-posix/rcS"
   grep -qF '[ "$PX4_DITTO_UXRCE" = "1" ] && uxrce_dds_client start -t udp -p $uxrce_dds_port $uxrce_dds_ns' "$rootfs/etc/init.d-posix/rcS" || die "could not gate PX4 XRCE startup"
-  touch "$rootfs/.ditto-viewer-profile-v18"
+  touch "$rootfs/.ditto-viewer-profile-v19"
 fi
 data="$rootfs/etc"
 location_file="$SIM_PROTOTYPE_ROOT/.location.env"
