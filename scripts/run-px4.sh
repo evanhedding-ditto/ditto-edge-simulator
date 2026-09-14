@@ -17,7 +17,7 @@ wait_for_fleet_edge_sockets
 wait_for_fleet_xrce_listeners
 stagger_px4_boot "$index"
 rootfs="$(node_dir "px4_$index")/rootfs"
-if [[ ! -f "$rootfs/.ditto-viewer-profile-v17" ]]; then
+if [[ ! -f "$rootfs/.ditto-viewer-profile-v18" ]]; then
   [[ ! -e "$rootfs/etc" ]] || die "stale PX4 rootfs; restart the simulator"
   mkdir -p "$rootfs"
   cp -cR "$source_data" "$rootfs/etc"
@@ -40,11 +40,17 @@ fi\
 true' "$mavlink"
   sed -i '' '/HIL_ACTUATOR_CONTROLS/d' "$mavlink"
   sed -i '' '/HIL_STATE_QUATERNION/d' "$mavlink"
+  # Bound every daemon round-trip rcS makes (~200 per vehicle, no timeout in
+  # PX4): a hung px4-<cmd> is killed and retried, and three hangs abort rcS so
+  # the vehicle reports failed instead of wedging forever.
+  cp "$SIM_ROOT/config/px4-bounded.sh" "$rootfs/etc/init.d-posix/px4-bounded.sh"
+  sed -i '' "s|^\. px4-alias\.sh\$|. $rootfs/etc/init.d-posix/px4-bounded.sh|" "$rootfs/etc/init.d-posix/rcS"
+  grep -qF "px4-bounded.sh" "$rootfs/etc/init.d-posix/rcS" || die "could not bound PX4 startup calls"
   # Native MAVLink vehicles do not use DDS. Avoid starting ten disconnected
   # XRCE clients during fleet boot.
   sed -i '' 's/^uxrce_dds_client start -t udp -p \$uxrce_dds_port \$uxrce_dds_ns$/[ "$PX4_DITTO_UXRCE" = "1" ] \&\& uxrce_dds_client start -t udp -p $uxrce_dds_port $uxrce_dds_ns/' "$rootfs/etc/init.d-posix/rcS"
   grep -qF '[ "$PX4_DITTO_UXRCE" = "1" ] && uxrce_dds_client start -t udp -p $uxrce_dds_port $uxrce_dds_ns' "$rootfs/etc/init.d-posix/rcS" || die "could not gate PX4 XRCE startup"
-  touch "$rootfs/.ditto-viewer-profile-v17"
+  touch "$rootfs/.ditto-viewer-profile-v18"
 fi
 data="$rootfs/etc"
 location_file="$SIM_PROTOTYPE_ROOT/.location.env"
