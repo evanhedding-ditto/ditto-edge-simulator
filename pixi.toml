@@ -1,0 +1,10 @@
+[workspace]
+channels = ["https://prefix.dev/robostack-jazzy"]
+name = "ditto-edge-simulator"
+platforms = ["osx-arm64"]
+version = "0.1.0"
+
+[tasks]
+sim = "./scripts/sim.sh"
+sim-down = "./scripts/down.sh"
+sim-status = "./scripts/status.sh"

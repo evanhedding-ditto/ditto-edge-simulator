@@ -1,0 +1,42 @@
+database:
+  db_id: "${DITTO_DB_ID}"
+  device_name: "${SIM_DEVICE_NAME}"
+  persistence_dir:
+    path: "${SIM_PERSISTENCE_DIR}"
+  transport_config:
+    peer_to_peer:
+      ble_enabled: false
+      lan_enabled: false
+      lan_mdns_enabled: false
+      lan_multicast_enabled: false
+    connect_config:
+      known_tcp_servers: ${SIM_KNOWN_TCP_SERVERS}
+      known_ws_servers: ["${DITTO_WEBSOCKET_URL}"]
+      retry_interval_msec: 250
+    listen_config:
+      tcp_listen:
+        enable: true
+        ip: "127.0.0.1"
+        port: ${SIM_TCP_PORT}
+  auth:
+    server:
+      access_token: "${DITTO_ACCESS_TOKEN}"
+      auth_url: "${DITTO_AUTH_URL}"
+      provider: "__playgroundProvider"
+      enable_cloud_sync: false
+  subscriptions:
+    # Fleet state and intent are deliberately mesh-wide.  Execution remains local:
+    # each adapter selects only its own entry from fleet_commands.
+    - "SELECT * FROM vehicle_state"
+    - "SELECT * FROM fleet_commands"
+    - "SELECT * FROM fleet_command_receipts"
+
+grpc_server:
+  socket_path: "${SIM_SOCKET_PATH}"
+
+auth: dev_mode
+
+logging:
+  ditto_sdk: warning
+  edge_server:
+    audit_logs: temp_dir

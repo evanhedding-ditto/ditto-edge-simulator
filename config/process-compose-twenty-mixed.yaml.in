@@ -1,0 +1,101 @@
+version: "0.5"
+
+processes:
+  network: {command: ./scripts/run-network.sh, availability: {restart: always}}
+  edge-px4-0: {command: ./scripts/run-edge-server.sh vehicle 0, availability: {restart: always}}
+  edge-px4-1: {command: ./scripts/run-edge-server.sh vehicle 1, availability: {restart: always}}
+  edge-px4-2: {command: ./scripts/run-edge-server.sh vehicle 2, availability: {restart: always}}
+  edge-px4-3: {command: ./scripts/run-edge-server.sh vehicle 3, availability: {restart: always}}
+  edge-px4-4: {command: ./scripts/run-edge-server.sh vehicle 4, availability: {restart: always}}
+  edge-px4-5: {command: ./scripts/run-edge-server.sh vehicle 5, availability: {restart: always}}
+  edge-px4-6: {command: ./scripts/run-edge-server.sh vehicle 6, availability: {restart: always}}
+  edge-px4-7: {command: ./scripts/run-edge-server.sh vehicle 7, availability: {restart: always}}
+  edge-px4-8: {command: ./scripts/run-edge-server.sh vehicle 8, availability: {restart: always}}
+  edge-px4-9: {command: ./scripts/run-edge-server.sh vehicle 9, availability: {restart: always}}
+  edge-px4-10: {command: ./scripts/run-edge-server.sh vehicle 10, availability: {restart: always}}
+  edge-px4-11: {command: ./scripts/run-edge-server.sh vehicle 11, availability: {restart: always}}
+  edge-px4-12: {command: ./scripts/run-edge-server.sh vehicle 12, availability: {restart: always}}
+  edge-px4-13: {command: ./scripts/run-edge-server.sh vehicle 13, availability: {restart: always}}
+  edge-px4-14: {command: ./scripts/run-edge-server.sh vehicle 14, availability: {restart: always}}
+  edge-px4-15: {command: ./scripts/run-edge-server.sh vehicle 15, availability: {restart: always}}
+  edge-px4-16: {command: ./scripts/run-edge-server.sh vehicle 16, availability: {restart: always}}
+  edge-px4-17: {command: ./scripts/run-edge-server.sh vehicle 17, availability: {restart: always}}
+  edge-px4-18: {command: ./scripts/run-edge-server.sh vehicle 18, availability: {restart: always}}
+  edge-px4-19: {command: ./scripts/run-edge-server.sh vehicle 19, availability: {restart: always}}
+  edge-operator:
+    command: ./scripts/run-edge-server.sh operator 0
+    depends_on:
+      network: {condition: process_started}
+      edge-px4-0: {condition: process_started}
+      edge-px4-1: {condition: process_started}
+      edge-px4-2: {condition: process_started}
+      edge-px4-3: {condition: process_started}
+      edge-px4-4: {condition: process_started}
+      edge-px4-5: {condition: process_started}
+      edge-px4-6: {condition: process_started}
+      edge-px4-7: {condition: process_started}
+      edge-px4-8: {condition: process_started}
+      edge-px4-9: {condition: process_started}
+      edge-px4-10: {condition: process_started}
+      edge-px4-11: {condition: process_started}
+      edge-px4-12: {condition: process_started}
+      edge-px4-13: {condition: process_started}
+      edge-px4-14: {condition: process_started}
+      edge-px4-15: {condition: process_started}
+      edge-px4-16: {condition: process_started}
+      edge-px4-17: {condition: process_started}
+      edge-px4-18: {condition: process_started}
+      edge-px4-19: {condition: process_started}
+    availability: {restart: always}
+
+  xrce-px4-0: {command: ./scripts/run-xrce-agent.sh 0, availability: {restart: always}}
+  xrce-px4-1: {command: ./scripts/run-xrce-agent.sh 1, availability: {restart: always}}
+  xrce-px4-2: {command: ./scripts/run-xrce-agent.sh 2, availability: {restart: always}}
+  xrce-px4-3: {command: ./scripts/run-xrce-agent.sh 3, availability: {restart: always}}
+  xrce-px4-4: {command: ./scripts/run-xrce-agent.sh 4, availability: {restart: always}}
+  xrce-px4-5: {command: ./scripts/run-xrce-agent.sh 5, availability: {restart: always}}
+  xrce-px4-6: {command: ./scripts/run-xrce-agent.sh 6, availability: {restart: always}}
+  xrce-px4-7: {command: ./scripts/run-xrce-agent.sh 7, availability: {restart: always}}
+  xrce-px4-8: {command: ./scripts/run-xrce-agent.sh 8, availability: {restart: always}}
+  xrce-px4-9: {command: ./scripts/run-xrce-agent.sh 9, availability: {restart: always}}
+  sih-px4-0: {command: ./scripts/run-px4.sh 0, depends_on: {xrce-px4-0: {condition: process_started}}, availability: {restart: always}}
+  sih-px4-1: {command: ./scripts/run-px4.sh 1, depends_on: {xrce-px4-1: {condition: process_started}}, availability: {restart: always}}
+  sih-px4-2: {command: ./scripts/run-px4.sh 2, depends_on: {xrce-px4-2: {condition: process_started}}, availability: {restart: always}}
+  sih-px4-3: {command: ./scripts/run-px4.sh 3, depends_on: {xrce-px4-3: {condition: process_started}}, availability: {restart: always}}
+  sih-px4-4: {command: ./scripts/run-px4.sh 4, depends_on: {xrce-px4-4: {condition: process_started}}, availability: {restart: always}}
+  sih-px4-5: {command: ./scripts/run-px4.sh 5, depends_on: {xrce-px4-5: {condition: process_started}}, availability: {restart: always}}
+  sih-px4-6: {command: ./scripts/run-px4.sh 6, depends_on: {xrce-px4-6: {condition: process_started}}, availability: {restart: always}}
+  sih-px4-7: {command: ./scripts/run-px4.sh 7, depends_on: {xrce-px4-7: {condition: process_started}}, availability: {restart: always}}
+  sih-px4-8: {command: ./scripts/run-px4.sh 8, depends_on: {xrce-px4-8: {condition: process_started}}, availability: {restart: always}}
+  sih-px4-9: {command: ./scripts/run-px4.sh 9, depends_on: {xrce-px4-9: {condition: process_started}}, availability: {restart: always}}
+  sih-px4-10: {command: ./scripts/run-px4.sh 10, depends_on: {edge-px4-10: {condition: process_started}}, availability: {restart: always}}
+  sih-px4-11: {command: ./scripts/run-px4.sh 11, depends_on: {edge-px4-11: {condition: process_started}}, availability: {restart: always}}
+  sih-px4-12: {command: ./scripts/run-px4.sh 12, depends_on: {edge-px4-12: {condition: process_started}}, availability: {restart: always}}
+  sih-px4-13: {command: ./scripts/run-px4.sh 13, depends_on: {edge-px4-13: {condition: process_started}}, availability: {restart: always}}
+  sih-px4-14: {command: ./scripts/run-px4.sh 14, depends_on: {edge-px4-14: {condition: process_started}}, availability: {restart: always}}
+  sih-px4-15: {command: ./scripts/run-px4.sh 15, depends_on: {edge-px4-15: {condition: process_started}}, availability: {restart: always}}
+  sih-px4-16: {command: ./scripts/run-px4.sh 16, depends_on: {edge-px4-16: {condition: process_started}}, availability: {restart: always}}
+  sih-px4-17: {command: ./scripts/run-px4.sh 17, depends_on: {edge-px4-17: {condition: process_started}}, availability: {restart: always}}
+  sih-px4-18: {command: ./scripts/run-px4.sh 18, depends_on: {edge-px4-18: {condition: process_started}}, availability: {restart: always}}
+  sih-px4-19: {command: ./scripts/run-px4.sh 19, depends_on: {edge-px4-19: {condition: process_started}}, availability: {restart: always}}
+
+  ros-px4-0: {command: ./scripts/run-ros-adapter.sh 0, depends_on: {edge-px4-0: {condition: process_started}, sih-px4-0: {condition: process_started}}, availability: {restart: always}}
+  ros-px4-1: {command: ./scripts/run-ros-adapter.sh 1, depends_on: {edge-px4-1: {condition: process_started}, sih-px4-1: {condition: process_started}}, availability: {restart: always}}
+  ros-px4-2: {command: ./scripts/run-ros-adapter.sh 2, depends_on: {edge-px4-2: {condition: process_started}, sih-px4-2: {condition: process_started}}, availability: {restart: always}}
+  ros-px4-3: {command: ./scripts/run-ros-adapter.sh 3, depends_on: {edge-px4-3: {condition: process_started}, sih-px4-3: {condition: process_started}}, availability: {restart: always}}
+  ros-px4-4: {command: ./scripts/run-ros-adapter.sh 4, depends_on: {edge-px4-4: {condition: process_started}, sih-px4-4: {condition: process_started}}, availability: {restart: always}}
+  ros-px4-5: {command: ./scripts/run-ros-adapter.sh 5, depends_on: {edge-px4-5: {condition: process_started}, sih-px4-5: {condition: process_started}}, availability: {restart: always}}
+  ros-px4-6: {command: ./scripts/run-ros-adapter.sh 6, depends_on: {edge-px4-6: {condition: process_started}, sih-px4-6: {condition: process_started}}, availability: {restart: always}}
+  ros-px4-7: {command: ./scripts/run-ros-adapter.sh 7, depends_on: {edge-px4-7: {condition: process_started}, sih-px4-7: {condition: process_started}}, availability: {restart: always}}
+  ros-px4-8: {command: ./scripts/run-ros-adapter.sh 8, depends_on: {edge-px4-8: {condition: process_started}, sih-px4-8: {condition: process_started}}, availability: {restart: always}}
+  ros-px4-9: {command: ./scripts/run-ros-adapter.sh 9, depends_on: {edge-px4-9: {condition: process_started}, sih-px4-9: {condition: process_started}}, availability: {restart: always}}
+  mavlink-px4-10: {command: ./scripts/run-mavlink-adapter.sh 10, depends_on: {edge-px4-10: {condition: process_started}, sih-px4-10: {condition: process_started}}, availability: {restart: always}}
+  mavlink-px4-11: {command: ./scripts/run-mavlink-adapter.sh 11, depends_on: {edge-px4-11: {condition: process_started}, sih-px4-11: {condition: process_started}}, availability: {restart: always}}
+  mavlink-px4-12: {command: ./scripts/run-mavlink-adapter.sh 12, depends_on: {edge-px4-12: {condition: process_started}, sih-px4-12: {condition: process_started}}, availability: {restart: always}}
+  mavlink-px4-13: {command: ./scripts/run-mavlink-adapter.sh 13, depends_on: {edge-px4-13: {condition: process_started}, sih-px4-13: {condition: process_started}}, availability: {restart: always}}
+  mavlink-px4-14: {command: ./scripts/run-mavlink-adapter.sh 14, depends_on: {edge-px4-14: {condition: process_started}, sih-px4-14: {condition: process_started}}, availability: {restart: always}}
+  mavlink-px4-15: {command: ./scripts/run-mavlink-adapter.sh 15, depends_on: {edge-px4-15: {condition: process_started}, sih-px4-15: {condition: process_started}}, availability: {restart: always}}
+  mavlink-px4-16: {command: ./scripts/run-mavlink-adapter.sh 16, depends_on: {edge-px4-16: {condition: process_started}, sih-px4-16: {condition: process_started}}, availability: {restart: always}}
+  mavlink-px4-17: {command: ./scripts/run-mavlink-adapter.sh 17, depends_on: {edge-px4-17: {condition: process_started}, sih-px4-17: {condition: process_started}}, availability: {restart: always}}
+  mavlink-px4-18: {command: ./scripts/run-mavlink-adapter.sh 18, depends_on: {edge-px4-18: {condition: process_started}, sih-px4-18: {condition: process_started}}, availability: {restart: always}}
+  mavlink-px4-19: {command: ./scripts/run-mavlink-adapter.sh 19, depends_on: {edge-px4-19: {condition: process_started}, sih-px4-19: {condition: process_started}}, availability: {restart: always}}
