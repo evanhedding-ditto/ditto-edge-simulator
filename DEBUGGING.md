@@ -210,3 +210,112 @@ The latest evidence also shows an intermittently wedged ROS bridge constructor
 without a `bridge ready` log; ROS starts are now staggered. No run has reached
 the viewer yet, so no command/motion or managed-viewer-shutdown validation pass
 is claimed.
+
+## PX4 daemon lost wakeup and the bounded-call wrapper — 2026-09-14
+
+**Status: partially validated. It is not yet established what is fixed.** One
+managed launch on commit `d9dd4db` reached 20/20 PX4 startups. On that same
+launch `px4_0` accepted its command, armed, and detected takeoff, but did not
+move to the commanded position; that is unexplained (see below). The two-run
+lifecycle gate has not been passed. Treat every claim in this section as
+evidence-backed for the single-instance experiments and *unconfirmed at fleet
+scale* until repeated launches say otherwise.
+
+### Symptom
+
+Every 20-node launch today hung on a random vehicle (`px4_4`; `px4_1`+`px4_10`;
+`px4_9`; `px4_0`; `px4_19`; `px4_17`+`px4_18`; `px4_2`+`px4_15`). Eighteen or
+nineteen vehicles finished `rcS` in ~40 s; the rest sat in `rcS` for minutes
+until the fleet budget expired. The serial in-order gate blamed a later,
+healthy vehicle (`px4_18`, `px4_2`) for a hang elsewhere.
+
+### Root cause, as captured
+
+Reproduced on a **single idle PX4 with the pristine `etc/`** (no simulator
+scripts involved), then captured with stack samples and `lsof`:
+
+- client (`px4-commander --instance N start`): connected to
+  `/tmp/px4-sock-N`, blocked in `read()` at `client.cpp:141`;
+- server: daemon thread alive in `poll()` at `server.cpp:150`, **zero accepted
+  connections, no `_handle_client` thread, no output**;
+- the client's socket peer was the **listen** socket — the connection was in
+  the accept backlog, never accepted;
+- a second connection woke `poll()`; accept is FIFO, so the stuck command was
+  served first and completed once; `rcS` then finished.
+
+So PX4's posix daemon occasionally misses the wakeup for a pending client
+connection. Rate ≈ 1 per 2,000–4,000 calls; `rcS` makes ~200 calls per
+vehicle (an unloaded `rcS` finishes all of them in ~1 s); a 20-vehicle launch
+is ~4,000 calls, hence about one hang per launch. It reproduced at load
+average 2; load only widens the timing window. 4,000 iterations of the same
+poll/accept/shutdown pattern in a bare loop lost no wakeups, so it is specific
+to PX4's daemon loop, not macOS `poll()`. Lost wakeups clustered on the
+rapid `px4-mavlink` burst after `mavlink start`. Worth an upstream PX4 report.
+
+Disproved today, each by direct test: lockstep starvation (px4_19 wedged
+before SIH started), CPU or memory pressure as the cause, a `POLLHUP`-only fd
+leak, `EMFILE` on `accept()`. Do not rebuild PX4 with `CONFIG_BOARD_NOLOCKSTEP`:
+SIH's realtime path integrates an unclamped wall-clock `dt` and it disables
+`PX4_SIM_SPEED_FACTOR`.
+
+### Fix
+
+`config/px4-bounded.sh` is installed into each rootfs by `run-px4.sh`, which
+redirects `rcS` line 11 from `. px4-alias.sh` to it (marker `v19`). It sources
+the real aliases, then replaces every `px4-*` alias with a function that runs
+the client in the background and polls with exponential backoff from 5 ms.
+After `PX4_CALL_NUDGE_MS` (2 s) of silence it opens one extra connection
+(`px4-param show SYS_AUTOSTART`), which wakes the daemon; the stuck command
+completes exactly once, so there are no duplicate side effects (a retried
+`mavlink start` fails with `port already occupied`). Kill-and-retry after
+`PX4_CALL_TIMEOUT_S` (30 s, `PX4_CALL_ATTEMPTS` 3) is the fallback; the third
+hang exits `rcS` with status 1 so the vehicle is reported failed rather than
+left silently misconfigured (`rcS` runs with `set -e` disabled). A completed
+call's exit code passes through untouched: `param compare`/`greater` return 1
+to mean false inside `rcS` conditionals.
+
+`wait_for_fleet_px4_startup` now polls vehicles as a set and reports the real
+pending list, restarts a vehicle only on `Startup script returned with return
+value` (preserving its log as `failed-px4-N-attemptK.log`), and keeps a 120 s
+silence fallback. `wait_for_fleet_infrastructure` reports Net/Edge/XRCE/PX4
+launched tiers before the startup gate.
+
+Two regressions were introduced and fixed the same day: a 200 ms poll floor
+(40× slowdown; fleet finished 10/20) and a 45 s silence restart that killed
+healthy vehicles. Lesson: test the wrapper against real PX4, not a fake client.
+
+### Evidence
+
+- Single instance, pristine config, no wrapper: 1 hang in ~6 boots (60 s cap).
+- Single instance, wrapper: **25/25 boots, 3 lost wakeups, each healed in 2 s,
+  0 retries, 0 aborts, 1.5 s per boot (4.3 s when nudged).**
+- Fleet: one managed launch reached 20/20 startups. `px4_0` was nudged once
+  (`dataman start`), armed, detected takeoff, and did not move to its command.
+  Evidence retained in `build/runtime/mvp-twenty-mixed/px4_0-command-failure-*`.
+  Whether the nudge is related is unknown.
+
+### Earlier ordering regression, fixed first
+
+`config/process-compose-*-mixed.yaml.in` and `run-px4.sh` were edited on
+2026-09-11 at 16:26–16:29 — after the validated session ended (docs written
+16:19) — making each MAVLink PX4 depend on its adapter and adding a fleet-wide
+`wait_for_fleet_mavlink_listeners` barrier, contradicting the order documented
+above. Reverted (`cb85d0c` baseline captures the revert); the first clean
+20-node run and both demo scripts followed. That change was not the daemon
+bug, but it was real and it was undocumented.
+
+### Still open
+
+- `px4_0` not moving after an accepted command (above).
+- Two-run lifecycle validation: 0/2 on `d9dd4db`.
+- A separate intermittent PX4 sensor-init failure (`Preflight Fail: No valid
+  data from Baro 0 / Compass 0` → invalid EKF position → `invalid setpoints` →
+  blind land), seen earlier on `px4_0` and `px4_5`; not adapter-related.
+- `wait-ready.sh` dies on the 2- and 4-node scenarios
+  (`SIM_MESH_PEERS_PER_VEHICLE` unbound); `lib.sh` carries three uncalled
+  functions (`wait_for_px4_sih`, `wait_for_fleet_px4_sih`,
+  `wait_for_fleet_mavlink_listeners`).
+- Adapters: both rewritten onto one architecture (Ditto-Edge-Adapters
+  `e04109f`); at 20 nodes, accepted receipts went from 17/20 to 20/20. The
+  MAVLink adapter's original defect was a biased `select!` that starved command
+  intake and awaited gRPC inside the control loop.

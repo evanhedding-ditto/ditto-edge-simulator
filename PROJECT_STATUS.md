@@ -1,6 +1,18 @@
 # Ditto Edge Simulator — Project Status
 
-Last updated: 2026-09-11
+Last updated: 2026-09-14
+
+## Status — 2026-09-14
+
+**Not yet known what is fixed.** The random per-vehicle startup hang was traced
+to PX4's posix daemon missing a `poll()` wakeup for a pending client
+connection, and `config/px4-bounded.sh` now nudges the daemon after 2 s of
+silence. That is proven on a single instance (25/25 boots) and has produced
+exactly one 20/20 fleet startup; on that launch `px4_0` accepted its command
+and armed but did not move. The two-run lifecycle gate is 0/2. Full record,
+disproved theories, and open items: [`DEBUGGING.md`](DEBUGGING.md), section
+"PX4 daemon lost wakeup". The repository was first committed today
+(`cb85d0c` baseline; fixes in `680869a`, `5c8a22d`, `d9dd4db`).
 
 ## Startup reliability update — 2026-09-10
 
