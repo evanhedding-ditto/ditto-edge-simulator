@@ -290,9 +290,18 @@ healthy vehicles. Lesson: test the wrapper against real PX4, not a fake client.
 - Single instance, wrapper: **25/25 boots, 3 lost wakeups, each healed in 2 s,
   0 retries, 0 aborts, 1.5 s per boot (4.3 s when nudged).**
 - Fleet: one managed launch reached 20/20 startups. `px4_0` was nudged once
-  (`dataman start`), armed, detected takeoff, and did not move to its command.
-  Evidence retained in `build/runtime/mvp-twenty-mixed/px4_0-command-failure-*`.
-  Whether the nudge is related is unknown.
+  (`dataman start`) and booted normally. **Correction to the first draft of
+  this section:** its *first* command was receipted `failed:
+  autopilot_unavailable` — the command was written ~6 s before px4_0's ROS
+  adapter started, the adapter observed it on startup before any telemetry
+  had arrived (`revision == 0`), and the adapter rejects that case immediately
+  instead of holding the command until telemetry arrives or it expires. Its
+  later commands executed correctly (it was at its seq-35 target within 2
+  minutes). The earlier "did not move" reading came from operator-side
+  `vehicle_state` that was 14 s stale; replicated state at the operator lags
+  4–14 s, which is a separate observation worth keeping in mind when judging
+  motion from the viewer. Evidence retained in
+  `build/runtime/mvp-twenty-mixed/px4_0-command-failure-*` (survives teardown).
 
 ### Earlier ordering regression, fixed first
 
@@ -306,7 +315,11 @@ bug, but it was real and it was undocumented.
 
 ### Still open
 
-- `px4_0` not moving after an accepted command (above).
+- Adapter startup race: a command that already exists when an adapter starts
+  is rejected `autopilot_unavailable` if no telemetry has arrived yet, rather
+  than held. px4_0 is the usual victim because its telemetry is consistently
+  the last to arrive. Fix belongs in both adapters' `start()`: do not dequeue
+  while `revision == 0`; let expiry fail it if telemetry never comes.
 - Two-run lifecycle validation: 0/2 on `d9dd4db`.
 - A separate intermittent PX4 sensor-init failure (`Preflight Fail: No valid
   data from Baro 0 / Compass 0` → invalid EKF position → `invalid setpoints` →
