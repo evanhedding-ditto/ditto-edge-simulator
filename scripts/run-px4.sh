@@ -11,13 +11,15 @@ boot_timeout="${SIM_PX4_BOOT_TIMEOUT_SECONDS:-90}"
 binary="$SIM_PX4_ROOT/build/px4_sitl_sih/bin/px4"
 source_data="$SIM_PX4_ROOT/build/px4_sitl_sih/etc"
 [[ -x "$binary" ]] || die "PX4 SIH binary is not executable: $binary"
+px4_phase "px4_$index" launch
 is_mavlink=false
 is_mavlink_vehicle "$index" && is_mavlink=true
 wait_for_fleet_edge_sockets
 wait_for_fleet_xrce_listeners
 stagger_px4_boot "$index"
+px4_phase "px4_$index" barriers
 rootfs="$(node_dir "px4_$index")/rootfs"
-if [[ ! -f "$rootfs/.ditto-viewer-profile-v19" ]]; then
+if [[ ! -f "$rootfs/.ditto-viewer-profile-v21" ]]; then
   [[ ! -e "$rootfs/etc" ]] || die "stale PX4 rootfs; restart the simulator"
   mkdir -p "$rootfs"
   cp -cR "$source_data" "$rootfs/etc"
@@ -48,9 +50,16 @@ true' "$mavlink"
   grep -qF "px4-bounded.sh" "$rootfs/etc/init.d-posix/rcS" || die "could not bound PX4 startup calls"
   # Native MAVLink vehicles do not use DDS. Avoid starting ten disconnected
   # XRCE clients during fleet boot.
-  sed -i '' 's/^uxrce_dds_client start -t udp -p \$uxrce_dds_port \$uxrce_dds_ns$/[ "$PX4_DITTO_UXRCE" = "1" ] \&\& uxrce_dds_client start -t udp -p $uxrce_dds_port $uxrce_dds_ns/' "$rootfs/etc/init.d-posix/rcS"
-  grep -qF '[ "$PX4_DITTO_UXRCE" = "1" ] && uxrce_dds_client start -t udp -p $uxrce_dds_port $uxrce_dds_ns' "$rootfs/etc/init.d-posix/rcS" || die "could not gate PX4 XRCE startup"
-  touch "$rootfs/.ditto-viewer-profile-v19"
+  #
+  # UXRCE_DDS_PTCFG=1 builds the agent-side participant for loopback only: no
+  # shared memory, no interface enumeration, no multicast. Everything here is on
+  # 127.0.0.1. The default (0, full builtin transports) makes participant
+  # creation exceed the 1000 ms the client allows it
+  # (uxrce_dds_client.cpp:312), stranding a vehicle with
+  # "create entities failed: participant: 255" and no recovery path.
+  sed -i '' 's/^uxrce_dds_client start -t udp -p \$uxrce_dds_port \$uxrce_dds_ns$/[ "$PX4_DITTO_UXRCE" = "1" ] \&\& { param set UXRCE_DDS_PTCFG 1; uxrce_dds_client start -t udp -p $uxrce_dds_port $uxrce_dds_ns; }/' "$rootfs/etc/init.d-posix/rcS"
+  grep -qF 'param set UXRCE_DDS_PTCFG 1; uxrce_dds_client start' "$rootfs/etc/init.d-posix/rcS" || die "could not gate PX4 XRCE startup"
+  touch "$rootfs/.ditto-viewer-profile-v21"
 fi
 data="$rootfs/etc"
 location_file="$SIM_PROTOTYPE_ROOT/.location.env"
@@ -73,4 +82,5 @@ runtime="$(node_dir "px4_$index")/px4"
 mkdir -p "$runtime"
 cd "$runtime"
 : >px4.log
+px4_phase "px4_$index" exec
 exec "$binary" -i "$index" -d "$data" >>px4.log 2>&1

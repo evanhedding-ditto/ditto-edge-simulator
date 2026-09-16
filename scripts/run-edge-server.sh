@@ -13,4 +13,11 @@ config="$SIM_RUNTIME_DIR/edge-$role-$index.yaml"
 [[ -x "$binary" ]] || die "Edge Server binary is not executable: $binary"
 [[ -r "$config" ]] || die "render the fleet before starting Edge Server"
 [[ "${NO_COLOR:-}" != 1 ]] || export NO_COLOR=true
+# The SDK caps TCP connections per peer at mesh_chooser_max_wlan_connections,
+# default 6, counting inbound AND outbound. This topology gives every node
+# 2 * SIM_MESH_PEERS_PER_VEHICLE links, so anything above 3 peers silently ran
+# into AtCapacity rejection, 10s-600s backoff and ~120s churn. Edge Server has
+# no config surface for SDK system parameters, but the SDK reads any DITTO_*
+# environment variable as a parameter layer ranking above the SDK config.
+export DITTO_MESH_CHOOSER_MAX_WLAN_CONNECTIONS="${DITTO_MESH_CHOOSER_MAX_WLAN_CONNECTIONS:-20}"
 exec nice -n "${SIM_BACKGROUND_NICE:-10}" "$binary" run --config "$config"

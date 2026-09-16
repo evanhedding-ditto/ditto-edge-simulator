@@ -2,18 +2,48 @@
 
 Last updated: 2026-09-14
 
-## Status — 2026-09-14
+## Status — 2026-09-14 (evening)
 
-**Not yet known what is fixed.** The random per-vehicle startup hang was traced
-to PX4's posix daemon missing a `poll()` wakeup for a pending client
-connection, and `config/px4-bounded.sh` now nudges the daemon after 2 s of
-silence. That is proven on a single instance (25/25 boots) and has produced
-exactly one 20/20 fleet startup; on that launch `px4_0`'s first command was
-rejected `autopilot_unavailable` (adapter started after the command was
-written, before telemetry) and its later commands executed. The two-run lifecycle gate is 0/2. Full record,
-disproved theories, and open items: [`DEBUGGING.md`](DEBUGGING.md), section
-"PX4 daemon lost wakeup". The repository was first committed today
-(`cb85d0c` baseline; fixes in `680869a`, `5c8a22d`, `d9dd4db`).
+**Twenty-node startup is fixed: 20/20 in 57-60 s, on two consecutive headless
+runs.** It was failing outright earlier the same day (>392 s, 14-15/20).
+
+The cause was not what this file previously said. Startup is **disk-bound, not
+CPU-bound** — measured mid-boot at 61% idle CPU, ~21,000 disk tps and 25
+processes in uninterruptible wait. Every vehicle that finished booting began
+publishing `vehicle_state` at 10 Hz into a five-peer mesh, adding disk load for
+the vehicles still booting. `run-mavlink-adapter.sh` now waits on
+`px4-telemetry-ready` as `run-ros-adapter.sh` always did. That gate is the fix:
+removing it alone puts startup back to a 372 s failure. `build/` is also excluded
+from Spotlight indexing, which is worth keeping but is not what made the
+difference.
+
+Also fixed: teardown was preserving only four of twenty PX4 logs and wiping the
+wrong scenario's runtime (an `sim_init` variable-scoping bug), and the 120 s
+silence-based stall detector was restarting healthy vehicles — since the
+bounded-call wrapper landed, a real wedge is *noisy*, so silence now means
+"slow but alive".
+
+Separately, both adapters could not distinguish live telemetry from telemetry
+that had **stopped**; `revision == 0` only catches "never arrived". That is fixed
+and validated end to end, and every previously silent command rejection now logs.
+
+**The full two-run lifecycle gate PASSES on the four-node scenario** — two
+consecutive complete runs (36 s and 35 s), each covering PX4 boot, telemetry,
+readiness, an end-to-end command receipt with observed motion, and clean
+shutdown, across both adapter implementations.
+
+**The full two-run lifecycle gate now PASSES at twenty nodes**, 2/2 consecutive:
+startup, direct telemetry, readiness, `verify 20` reporting **20/20 vehicles
+command-ready and moving**, and clean shutdown.
+
+The last blocker was `UXRCE_DDS_PTCFG` sitting at its default, which made the
+agent build each DDS participant with shared memory, full interface enumeration
+and multicast — exceeding the 1000 ms PX4 hardcodes for it and stranding one or
+two ROS vehicles per run with no DDS telemetry. `run-px4.sh` now sets it to 1
+(loopback only), which is what this simulator actually needs.
+
+Full record, measurements, retracted theories and open items:
+[`DEBUGGING.md`](DEBUGGING.md), the two "2026-09-14 (later)" sections.
 
 ## Startup reliability update — 2026-09-10
 
@@ -89,7 +119,7 @@ out of scope.
     complete `down.sh` path when the viewer exits.
   - `pixi run sim-status` shows process states; `pixi run sim-down` is an idempotent stop.
 - SDK Unix-socket gRPC authority fix in
-  `../Ditto-Edge-Adapters/sdk/cpp/src/client.cpp`. It forces `localhost` authority so the Rust
+  `../Ditto-Edge-Server/ditto-edge-adapters/sdk/cpp/src/client.cpp`. It forces `localhost` authority so the Rust
   HTTP/2 server accepts UDS requests.
 
 ## Proven live
@@ -138,7 +168,7 @@ No Process Compose simulator session is active as of this update.
 
 The new simulator repository is still an initial uncommitted worktree; all source and configuration
 files are untracked. The adapter SDK transport fix is a separate uncommitted modification in
-`Ditto-Edge-Adapters`. Do not accidentally include the pre-existing untracked
+`Ditto-Edge-Server/ditto-edge-adapters`. Do not accidentally include the pre-existing untracked
 `Ditto-Edge-Server/CODEBASE_CONTEXT.md` in a commit.
 
 ## Deferred next work

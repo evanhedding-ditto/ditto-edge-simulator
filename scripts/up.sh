@@ -11,6 +11,10 @@ then
 fi
 clear_runtime_state
 rm -f -- "$SIM_RUNTIME_DIR"/last-*
+# Rotate rather than delete: comparing a startup change against the run before
+# it is the whole point of the phase data, and last-* is cleared above.
+[[ -f "$SIM_RUNTIME_DIR/px4-phases.tsv" ]] &&
+  mv -f -- "$SIM_RUNTIME_DIR/px4-phases.tsv" "$SIM_RUNTIME_DIR/prev-px4-phases.tsv"
 mkdir -p "$SIM_RUNTIME_DIR"
 SIM_RUN_STARTED_UNIX_MS="$(( $(date +%s) * 1000 ))"
 export SIM_RUN_STARTED_UNIX_MS

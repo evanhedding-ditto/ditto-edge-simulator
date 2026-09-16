@@ -16,7 +16,13 @@ for ((index = 0; index < SIM_VEHICLE_COUNT; ++index)); do
   arguments+=(--vehicle "px4_$index" --port "$((19410 + index))")
 done
 
-fleet_timeout="${SIM_PX4_FLEET_BOOT_TIMEOUT_SECONDS:-180}"
+# Twenty PX4s boot at ~2x CPU oversubscription, and rcS is ~200 sequential
+# client execs per vehicle: measured 55-181 s per vehicle, mean 116 s. At 180 s
+# the slowest healthy vehicle finished with ~1 s to spare, so the budget was
+# failing runs that would have passed. A genuine wedge is caught far sooner by
+# the stall detector (SIM_PX4_STALL_SECONDS) and the bounded-call abort, not by
+# this wall.
+fleet_timeout="${SIM_PX4_FLEET_BOOT_TIMEOUT_SECONDS:-300}"
 ready_timeout="${SIM_TELEMETRY_READY_TIMEOUT_SECONDS:-60}"
 for value in "$fleet_timeout" "$ready_timeout"; do
   [[ "$value" =~ ^[1-9][0-9]*$ ]] || die "telemetry timeouts must be positive integers"

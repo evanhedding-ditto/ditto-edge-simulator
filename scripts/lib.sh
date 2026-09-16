@@ -10,9 +10,13 @@ sim_init() {
   source "$SIM_SCENARIO_FILE"
   : "${SIM_PROTOTYPE_ROOT:=$SIM_ROOT/../ditto-autonomy-testing}"
   : "${SIM_PX4_ROOT:=$SIM_ROOT/../PX4-Autopilot}"
-  : "${SIM_EDGE_ADAPTERS_ROOT:=$SIM_ROOT/../Ditto-Edge-Adapters}"
+  : "${SIM_EDGE_ADAPTERS_ROOT:=$SIM_ROOT/../Ditto-Edge-Server/ditto-edge-adapters}"
   : "${SIM_EDGE_SERVER_ROOT:=$SIM_ROOT/../Ditto-Edge-Server}"
-  : "${SIM_RUNTIME_DIR:=$SIM_ROOT/build/runtime/$SIM_SCENARIO_ID}"
+  # Derived from the scenario just sourced, never carried over: down.sh calls
+  # sim_init once per scenario in one shell, and an exported :=default would
+  # pin the first scenario's directory while SIM_VEHICLE_COUNT changed under it.
+  [[ -n "${SIM_SCENARIO_ID:-}" ]] || die "scenario defines no SIM_SCENARIO_ID: $SIM_SCENARIO_FILE"
+  SIM_RUNTIME_DIR="$SIM_ROOT/build/runtime/$SIM_SCENARIO_ID"
   : "${DITTO_EDGE_ENV_FILE:=$SIM_ROOT/.env}"
   export SIM_ROOT SIM_SCENARIO_FILE SIM_PROTOTYPE_ROOT SIM_PX4_ROOT
   export SIM_EDGE_ADAPTERS_ROOT SIM_EDGE_SERVER_ROOT SIM_RUNTIME_DIR
@@ -31,6 +35,14 @@ load_ditto_credentials() {
 
 node_dir() { printf '%s/nodes/%s\n' "$SIM_RUNTIME_DIR" "$1"; }
 node_socket() { printf '%s/edge.sock\n' "$(node_dir "$1")"; }
+
+# Startup phase timestamps, one line per event, written outside nodes/ so they
+# survive teardown.  Twenty vehicles append concurrently; each line is far under
+# PIPE_BUF, so O_APPEND writes do not interleave.
+px4_phase() {
+  printf '%s\t%s\t%s\n' "$1" "$2" "$(( $(date +%s) * 1000 ))" \
+    >>"$SIM_RUNTIME_DIR/px4-phases.tsv" 2>/dev/null || true
+}
 
 known_simulator_ports() {
   local scenario port
@@ -284,7 +296,12 @@ wait_for_px4_startup() {
 # stops growing while the fleet moves on is restarted rather than waited on.
 wait_for_fleet_px4_startup() {
   local timeout="${1:?usage: wait_for_fleet_px4_startup <timeout>}"
-  local stall="${SIM_PX4_STALL_SECONDS:-120}" attempts="${SIM_PX4_BOOT_ATTEMPTS:-3}"
+  # Silence is a weak progress signal and a dangerous one since the bounded-call
+  # wrapper landed: a stuck call now logs "nudging daemon" within 2 s and escalates
+  # loudly, so a real wedge is noisy, while a healthy vehicle grinding through
+  # hundreds of silent `param set` calls under load can print nothing for minutes.
+  # At 120 s this restarted a live px4_9 mid-rcS and cost it the whole budget.
+  local stall="${SIM_PX4_STALL_SECONDS:-300}" attempts="${SIM_PX4_BOOT_ATTEMPTS:-3}"
   local deadline="$((SECONDS + timeout))" next=0 previous=-1
   local -a pending done_state last_size last_change tries
   local index log size ready list
@@ -296,10 +313,12 @@ wait_for_fleet_px4_startup() {
     ready=0; pending=()
     for ((index = 0; index < SIM_VEHICLE_COUNT; ++index)); do
       log="$(node_dir "px4_$index")/px4/px4.log"
-      if (( done_state[index] )) || grep -qF "Startup script returned successfully" "$log" 2>/dev/null
+      if (( done_state[index] == 0 )) &&
+        grep -qF "Startup script returned successfully" "$log" 2>/dev/null
       then
-        done_state[index]=1; ready="$((ready + 1))"; continue
+        done_state[index]=1; px4_phase "px4_$index" rcs_done
       fi
+      if (( done_state[index] )); then ready="$((ready + 1))"; continue; fi
       pending+=("px4_$index")
       # rcS reported failure (the bounded-call wrapper aborts it after three
       # hangs): PX4 is exiting and Process Compose relaunches it. Count the
@@ -342,7 +361,10 @@ wait_for_fleet_px4_startup() {
 wait_for_mesh_links() {
   local timeout="${1:?usage: wait_for_mesh_links <timeout>}"
   local metrics="$SIM_RUNTIME_DIR/network-metrics.json"
-  local expected="$((SIM_VEHICLE_COUNT * SIM_MESH_PEERS_PER_VEHICLE + SIM_OPERATOR_MESH_PEERS))"
+  # Same defaults as render-fleet.sh and run-network.sh, which build the topology
+  # this counts. Without them `set -u` aborts on the scenarios that omit both.
+  local peers="${SIM_MESH_PEERS_PER_VEHICLE:-1}" operator_peers="${SIM_OPERATOR_MESH_PEERS:-1}"
+  local expected="$((SIM_VEHICLE_COUNT * peers + operator_peers))"
   local deadline="$((SECONDS + timeout))" count=0 observed=0 previous=-1 next_status=0
   while :; do
     if [[ -r "$metrics" ]]; then

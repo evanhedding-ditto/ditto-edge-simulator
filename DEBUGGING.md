@@ -315,20 +315,219 @@ bug, but it was real and it was undocumented.
 
 ### Still open
 
-- Adapter startup race: a command that already exists when an adapter starts
-  is rejected `autopilot_unavailable` if no telemetry has arrived yet, rather
-  than held. px4_0 is the usual victim because its telemetry is consistently
-  the last to arrive. Fix belongs in both adapters' `start()`: do not dequeue
-  while `revision == 0`; let expiry fail it if telemetry never comes.
-- Two-run lifecycle validation: 0/2 on `d9dd4db`.
-- A separate intermittent PX4 sensor-init failure (`Preflight Fail: No valid
-  data from Baro 0 / Compass 0` → invalid EKF position → `invalid setpoints` →
-  blind land), seen earlier on `px4_0` and `px4_5`; not adapter-related.
-- `wait-ready.sh` dies on the 2- and 4-node scenarios
-  (`SIM_MESH_PEERS_PER_VEHICLE` unbound); `lib.sh` carries three uncalled
-  functions (`wait_for_px4_sih`, `wait_for_fleet_px4_sih`,
+- ~~Adapter startup race: do not dequeue while `revision == 0`.~~ **Retracted
+  2026-09-14.** That fix would not have helped any failure actually observed;
+  see "Adapters could not tell dead telemetry from live" below. The real defect
+  was that neither adapter could detect telemetry that had *stopped*, and it is
+  now fixed and validated.
+- Two-run lifecycle validation: startup passes 2/2 headless (57 s and 60 s);
+  `verify 20` still fails on the px4_2 XRCE defect, so the full gate including an
+  end-to-end fleet command is not yet met. See the two 2026-09-14 (later) sections.
+- ~~A separate intermittent PX4 sensor-init failure (`Preflight Fail: No valid
+  data from Baro 0 / Compass 0` → invalid EKF position → blind land).~~
+  **Resolved 2026-09-15 as a side effect of the startup fix.** It was a symptom
+  of the disk-contention slow boot, not an independent defect: the fault rate
+  tracked startup time (10 vehicles affected on a 367 s run, 3 on a 60 s run),
+  and the messages were transient EKF convergence noise that cleared —
+  `position_valid` was true on all 20 vehicles even when they logged. On a
+  post-fix run issuing a `goto` to each vehicle individually: **18/20 accepted,
+  armed and reached the target; zero `Preflight Fail`, zero `Arming denied`.**
+  The only two failures were the XRCE defect below.
+- ~~`wait-ready.sh` dies on the 2- and 4-node scenarios
+  (`SIM_MESH_PEERS_PER_VEHICLE` unbound)~~ **Fixed 2026-09-14:**
+  `wait_for_mesh_links` now defaults both peer counts to 1, matching
+  `render-fleet.sh` and `run-network.sh`, which already did. `lib.sh` still
+  carries three uncalled functions (`wait_for_px4_sih`, `wait_for_fleet_px4_sih`,
   `wait_for_fleet_mavlink_listeners`).
-- Adapters: both rewritten onto one architecture (Ditto-Edge-Adapters
+- Adapters: both rewritten onto one architecture (ditto-edge-adapters, then a standalone repo,
   `e04109f`); at 20 nodes, accepted receipts went from 17/20 to 20/20. The
   MAVLink adapter's original defect was a biased `select!` that starved command
   intake and awaited gRPC inside the control loop.
+
+## Startup is disk-bound, not CPU-bound — 2026-09-14 (later)
+
+**Status: 20/20 startup in 57-60 s, from >392 s or outright failure. Two
+consecutive passing runs, headless (up.sh / wait-telemetry.sh / down.sh), which
+is an explicit substitution for the managed `pixi run sim` path. See the run
+record below for exactly what is and is not proven.**
+
+### The measurement that changed the diagnosis
+
+The earlier reading in this file — that twenty SIH vehicles saturate the CPU —
+is wrong. Measured mid-startup on a twenty-node fleet:
+
+```
+CPU usage:  10.9% user, 28.7% sys, 61.5% IDLE
+Disk:       ~21,000 tps, 152-173 MB/s, 7.5 KB per transaction
+Threads:    25 processes in state U (uninterruptible disk wait), 4 running
+Memory:     71% free; the whole fleet is ~2.3 GB
+```
+
+Load average ~20 was processes **blocked on disk**, not computing. PX4 across all
+twenty instances never exceeded ~0.8 of a core. Sys time at 2.6x user time is the
+signature of syscall and I/O load, not computation.
+
+### The feedback loop
+
+Every vehicle that finishes booting starts publishing `vehicle_state` at 10 Hz,
+which replicates to five mesh peers plus the operator. Each completion therefore
+*adds* disk load for the vehicles still booting. That is why `rcS` time rose
+monotonically with boot order in every run before the fix.
+
+`run-ros-adapter.sh` already waited on `px4-telemetry-ready`, with the comment
+"this is a forwarding path; PX4 state generation takes precedence at startup".
+`run-mavlink-adapter.sh` waited only for its Edge socket, so ten MAVLink adapters
+published into the mesh throughout PX4 boot, against that documented intent. It
+now takes the same gate.
+
+Spotlight was also indexing `build/runtime`, which each run fills with ~1.8 GB of
+Ditto stores and ~500 MB of ULogs and then deletes. `build/.metadata_never_index`
+stops that (`build/` is gitignored).
+
+### The silence-based stall detector was inverted
+
+`SIM_PX4_STALL_SECONDS` restarted any vehicle whose log had not grown in 120 s.
+Since the bounded-call wrapper landed, a stuck call logs "nudging daemon" within
+2 s and escalates loudly — **a real wedge is noisy**. Silence now means a healthy
+vehicle grinding through hundreds of quiet `param set` calls. At 120 s this
+restarted a live px4_9 mid-`rcS` and cost it the whole budget. Raised to 300 s.
+
+### Run record
+
+| run | config | startup | note |
+| --- | --- | --- | --- |
+| 1 | no batch | FAIL 367 s, 14/20 | stall detector restarted healthy px4_9 |
+| 2 | batch 5 | FAIL 392 s, 15/20 | zero restarts; wave 3 never finished |
+| 3 | batch 5 + gate + Spotlight | **PASS 60 s, 20/20** | worst vehicle 56 s |
+| 4 | same as 3 | **PASS 57 s, 20/20** | consecutive confirmation |
+| 5 | same as 3, after clearing leaked DDS segments | **PASS 53 s, 20/20** | worst vehicle 49 s |
+
+`verify 20` failed on runs 3-5 (183-187 s) for one reason only: px4_2 has no DDS
+telemetry, so the fleet never reaches 20/20 fresh state and `verify` never issues
+a command. Startup itself is clean.
+
+### Four-node scenario: full lifecycle gate PASSED, 2/2 consecutive
+
+| run | startup | verify | shutdown | total |
+| --- | --- | --- | --- | --- |
+| gate4A | 8 s | **12 s, 4/4 command-ready and moving** | clean | 36 s |
+| gate4B | 9 s | **11 s, 4/4 command-ready and moving** | clean | 35 s |
+
+Two consecutive complete runs from a stopped state, covering PX4 boot, direct
+telemetry, application readiness, an end-to-end command receipt with observed
+motion, and managed shutdown. This is the headless path (`up.sh` /
+`wait-telemetry.sh` / `command.sh verify` / `down.sh`), an explicit substitution
+for `pixi run sim`, which opens the viewer.
+
+It exercises both adapter implementations (px4_0-1 ROS, px4_2-3 MAVLink) and so
+is the end-to-end validation of the telemetry-staleness change. It also confirms
+the twenty-node failures are scale effects, not defects in the vehicle stack:
+the same code, four vehicles, passes everything in 35 s.
+
+Runs 1 and 2 had **zero** wrapper nudges, hangs or aborts fleet-wide: the daemon
+lost-wakeup bug did not occur at all. Those failures were pure slowness.
+
+Run 3's per-vehicle `rcS` split is floored by the instrument — `rcs_done` is
+stamped by the fleet gate, which does not poll until infrastructure is ready
+(~54 s with the stagger), so earlier finishers are all stamped on its first pass.
+The fleet-level 60 s is real; the per-vehicle split in that run is not.
+
+**Attribution settled by single-variable test (2026-09-15):** with the MAVLink
+gate removed and the Spotlight exclusion left in place, startup FAILED at 372 s —
+against 53/57/60 s with the gate. The adapter gate is the fix; the Spotlight
+exclusion is housekeeping worth keeping but is not what made the difference.
+
+### A second accumulator: leaked Fast DDS segments
+
+`/private/tmp/boost_interprocess` had grown to 2,712 files and 701 MB of Fast DDS
+shared-memory segments dating back to 2026-09-10 — one set leaked per participant,
+never cleaned. Every participant creation touches that directory. Files older than
+24 h (2,115 of them, 545 MB, all from long-dead processes) were removed, leaving
+597 files / 152 MB. Note the UDP-only profile does **not** stop these being
+created: 170 appeared during today's runs alone. Worth a periodic sweep.
+
+## Adapters could not tell dead telemetry from live — 2026-09-14 (later)
+
+**Status: fixed in both adapters, validated end to end against a real failure.**
+
+### The defect
+
+Neither adapter's `Snapshot` carried a timestamp, so `revision == 0` was the only
+liveness test. That detects "no telemetry has ever arrived"; it cannot detect
+"telemetry stopped". Once `revision` was non-zero, a frozen snapshot was
+indistinguishable from a live one.
+
+Captured on px4_18: the adapter published state until t+1198 s, then stopped.
+Commands arriving at t+1558 s were dispatched against that frozen snapshot, which
+can never satisfy `done()`, so each burned the full 15 s offboard timeout and was
+receipted `px4_offboard_timeout` — blaming PX4 for refusing offboard when in fact
+the adapter was blind.
+
+### The fix
+
+`Snapshot.updated` holds the arrival time of the last telemetry, and a command is
+refused `autopilot_unavailable` when it is absent or older than 5 s. This replaces
+the `revision == 0` test, which it subsumes.
+
+5 s is not an invented number: it matches `kFreshStateMs` in
+`tools/fleet_command.cpp`, which refuses to issue against a vehicle whose state is
+older than that. That gate is the stricter of the two — the Edge write happens
+after the telemetry it carries — so a command the fleet considered safe to issue
+is never rejected by the adapter.
+
+All four rejection paths in both adapters were previously **silent**: a vehicle
+would sit still with no explanation in any log. They now log.
+
+### Validated
+
+On a live fleet, by hand:
+
+```
+px4_2 (XRCE session dead, no telemetry):
+  adapter: "command px4_2-... failed: autopilot_unavailable"     <- now logged
+  receipt: failed/autopilot_unavailable
+px4_0 (healthy):
+  adapter: "command px4_0-... accepted"
+  receipt: accepted                                              <- no false reject
+```
+
+### Retracted hypothesis
+
+The first theory in this file's "Still open" list — hold the command while
+`revision == 0` rather than rejecting — would not have fixed any observed failure.
+px4_2 had no telemetry for an entire 1778 s run; holding would only have delayed
+the identical failure until expiry while blocking the queue behind it.
+
+### XRCE session failure — ROOT-CAUSED AND FIXED (2026-09-15)
+
+```
+ERROR [uxrce_dds_client] create entities failed: participant: 255
+```
+
+`uxrce_dds_client.cpp:312` gives the agent a **hardcoded 1000 ms** to create the
+DDS participant and reply; `255` is the uninitialized status, i.e. no reply
+arrived. The retry at `:628` re-enters the same call and hits the same wall.
+
+**Cause:** `UXRCE_DDS_PTCFG` was left at its default of 0, so the agent built the
+participant with full builtin transports — shared memory, every interface,
+multicast discovery. That exceeds 1000 ms under load. Setting it to **1**
+(localhost only: `useBuiltinTransports=false`, one UDPv4 transport whitelisted to
+127.0.0.1) matches this simulator, where everything is on loopback.
+
+`run-px4.sh` now injects `param set UXRCE_DDS_PTCFG 1` into `rcS` alongside the
+existing XRCE gating (rootfs marker v21). **Result: 2 runs, 10/10 ROS vehicles
+with 27 writers, zero failures — baseline was 2 stranded per run.**
+
+**Full twenty-node lifecycle gate now PASSES, 2/2 consecutive:**
+
+| run | startup | verify | shutdown | total |
+| --- | --- | --- | --- | --- |
+| g20A | 56 s | **50 s — 20/20 command-ready and moving** | clean | 198 s |
+| g20B | 98 s | **118 s — 20/20 command-ready and moving** | clean | 310 s |
+
+Eliminated along the way, each by direct test: the UDP-only Fast DDS profile on
+the agents; clearing leaked `/private/tmp/boost_interprocess` segments;
+restarting the client module; restarting the agent; staggering client start by
+2 s per wave position; and `px4-bounded.sh` (failures reproduced with the wrapper
+fully disabled). Trimming `dds_topics.yaml` would NOT have helped — the failure
+is at the participant, before any writer exists.

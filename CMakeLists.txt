@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(ditto_edge_simulator LANGUAGES CXX)
 
-set(DITTO_EDGE_ADAPTERS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../Ditto-Edge-Adapters" CACHE PATH
+set(DITTO_EDGE_ADAPTERS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../Ditto-Edge-Server/ditto-edge-adapters" CACHE PATH
   "Ditto Edge Adapters checkout")
 set(PX4_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../PX4-Autopilot" CACHE PATH "PX4 checkout")
 if(NOT EXISTS "${DITTO_EDGE_ADAPTERS_ROOT}/sdk/cpp/CMakeLists.txt")
@@ -43,3 +43,4 @@ add_executable(ditto_fleet_command tools/fleet_command.cpp)
 target_compile_features(ditto_fleet_command PRIVATE cxx_std_17)
 target_compile_options(ditto_fleet_command PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(ditto_fleet_command PRIVATE DittoEdge::Client nlohmann_json::nlohmann_json)
+
