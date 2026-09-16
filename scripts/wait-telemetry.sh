@@ -27,10 +27,23 @@ ready_timeout="${SIM_TELEMETRY_READY_TIMEOUT_SECONDS:-60}"
 for value in "$fleet_timeout" "$ready_timeout"; do
   [[ "$value" =~ ^[1-9][0-9]*$ ]] || die "telemetry timeouts must be positive integers"
 done
-wait_for_fleet_infrastructure "$fleet_timeout"
-wait_for_fleet_px4_startup "$fleet_timeout"
-wait_for_fleet_px4_direct_streams "$fleet_timeout"
-printf '[PX4] Verifying direct position and attitude telemetry\n'
+if [[ "${SIM_SYNTHETIC_FLEET:-0}" == 1 ]]; then
+  # A synthetic fleet has no PX4 processes, so the three PX4 phases above have
+  # nothing to read: they gate on px4.log, which no synthetic vehicle writes.
+  # Everything after this point is identical, because the synthetic fleet emits
+  # the same GLOBAL_POSITION_INT and ATTITUDE on the same ports -- the probe and
+  # the marker are unchanged, so the viewer and sim.sh need no special case.
+  edge=()
+  for ((index = 0; index < SIM_VEHICLE_COUNT; ++index)); do edge+=("px4_$index"); done
+  edge+=(operator)
+  report_tier Edge "Edge Servers ready" "$fleet_timeout" edge_socket_ready "${edge[@]}"
+  printf '[Synthetic] Verifying position and attitude telemetry\n'
+else
+  wait_for_fleet_infrastructure "$fleet_timeout"
+  wait_for_fleet_px4_startup "$fleet_timeout"
+  wait_for_fleet_px4_direct_streams "$fleet_timeout"
+  printf '[PX4] Verifying direct position and attitude telemetry\n'
+fi
 if "$probe" --timeout "$ready_timeout" "${arguments[@]}" 2>&1 | tee -a "$report"; then
   touch "$marker"
   exit 0

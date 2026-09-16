@@ -13,7 +13,11 @@ SIM_OPERATOR_MESH_PEERS="${SIM_OPERATOR_MESH_PEERS:-1}"
 [[ "$SIM_OPERATOR_MESH_PEERS" =~ ^[1-9][0-9]*$ ]] || die "SIM_OPERATOR_MESH_PEERS must be positive"
 (( SIM_MESH_PEERS_PER_VEHICLE < SIM_VEHICLE_COUNT )) || die "SIM_MESH_PEERS_PER_VEHICLE must be less than SIM_VEHICLE_COUNT"
 (( SIM_OPERATOR_MESH_PEERS <= SIM_VEHICLE_COUNT )) || die "SIM_OPERATOR_MESH_PEERS must not exceed SIM_VEHICLE_COUNT"
-[[ -r "$SIM_ROOT/$SIM_PROCESS_TEMPLATE" ]] || die "process template not readable: $SIM_PROCESS_TEMPLATE"
+if [[ "$SIM_PROCESS_TEMPLATE" == *.sh ]]; then
+  [[ -x "$SIM_ROOT/$SIM_PROCESS_TEMPLATE" ]] || die "process template generator is not executable: $SIM_PROCESS_TEMPLATE"
+else
+  [[ -r "$SIM_ROOT/$SIM_PROCESS_TEMPLATE" ]] || die "process template not readable: $SIM_PROCESS_TEMPLATE"
+fi
 mkdir -p "$SIM_RUNTIME_DIR"
 
 render_edge() {
@@ -61,5 +65,17 @@ for ((vehicle = 0; vehicle < SIM_VEHICLE_COUNT; ++vehicle)); do
   render_edge vehicle "$vehicle"
 done
 render_edge operator 0
-envsubst < "$SIM_ROOT/$SIM_PROCESS_TEMPLATE" > "$SIM_RUNTIME_DIR/process-compose.yaml"
+# A template whose name ends in .sh is a generator rather than a file: a
+# hundred-vehicle scenario is a hundred edge-server entries, which is not
+# something to maintain by hand. Its stdout is the template envsubst expands,
+# and it is kept alongside the rendered output so a run can be reconstructed.
+template="$SIM_ROOT/$SIM_PROCESS_TEMPLATE"
+if [[ "$SIM_PROCESS_TEMPLATE" == *.sh ]]; then
+  template="$SIM_RUNTIME_DIR/process-compose.yaml.in"
+  # sim_init sources the scenario but exports only the path variables, so the
+  # generator is a child process that would otherwise see no fleet size.
+  SIM_VEHICLE_COUNT="$SIM_VEHICLE_COUNT" SIM_MAVLINK_VEHICLES="${SIM_MAVLINK_VEHICLES:-}" \
+    "$SIM_ROOT/$SIM_PROCESS_TEMPLATE" > "$template"
+fi
+envsubst < "$template" > "$SIM_RUNTIME_DIR/process-compose.yaml"
 printf '%s\n' "$SIM_RUNTIME_DIR"

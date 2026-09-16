@@ -71,7 +71,7 @@ Three vehicles had actual failed native-command receipts in that run: `px4_10`, 
 
 Likely place to investigate once the receipt error is known:
 
-`/Users/evan/ditto-repos/Ditto-Edge-Adapters/adapters/mavlink/px4_ditto_bridge/src/bridge.rs`
+`/Users/evan/ditto-repos/Ditto-Edge-Server/ditto-edge-adapters/adapters/mavlink/px4_ditto_bridge/src/bridge.rs`
 
 Native vehicles require PX4 heartbeat plus armed/offboard state before accepting movement commands. Possible current errors include offboard timeout, unavailable autopilot, or arm timeout; none has been proven yet.
 

@@ -44,3 +44,20 @@ target_compile_features(ditto_fleet_command PRIVATE cxx_std_17)
 target_compile_options(ditto_fleet_command PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(ditto_fleet_command PRIVATE DittoEdge::Client nlohmann_json::nlohmann_json)
 
+# Synthetic vehicle fleet. Compiles the adapter's schema, guidance and Edge
+# transport directly rather than reimplementing them, so synthetic vehicles emit
+# byte-identical documents and fly identical paths. Those three translation
+# units are deliberately free of rclcpp and px4_msgs; only bridge.cpp is not,
+# and it is the one thing this tool replaces.
+set(DITTO_ROS_ADAPTER "${DITTO_EDGE_ADAPTERS_ROOT}/adapters/ros2/px4_ditto_bridge")
+add_executable(ditto_synthetic_fleet
+  tools/synthetic_fleet.cpp
+  "${DITTO_ROS_ADAPTER}/src/documents.cpp"
+  "${DITTO_ROS_ADAPTER}/src/mission.cpp"
+  "${DITTO_ROS_ADAPTER}/src/edge_link.cpp")
+target_compile_features(ditto_synthetic_fleet PRIVATE cxx_std_17)
+target_compile_options(ditto_synthetic_fleet PRIVATE -Wall -Wextra -Wpedantic -Wno-missing-field-initializers)
+target_include_directories(ditto_synthetic_fleet PRIVATE
+  "${DITTO_ROS_ADAPTER}/include"
+  "${PX4_ROOT}/build/px4_sitl_sih")
+target_link_libraries(ditto_synthetic_fleet PRIVATE DittoEdge::Client nlohmann_json::nlohmann_json)
