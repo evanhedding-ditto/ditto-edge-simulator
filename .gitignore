@@ -2,4 +2,4 @@
 /build/
 /CMakeFiles/
 /.DS_Store
-/kbd.db
+/kbd.db*
