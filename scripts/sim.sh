@@ -35,10 +35,10 @@ if [[ ! -x "$viewer" || ! -x "$telemetry_probe" || ! -x "$network_relay" || "$SI
 then
   "$SIM_ROOT/scripts/build-viewer.sh"
 fi
-observer="$SIM_EDGE_ADAPTERS_ROOT/target/release/ditto-network-observer"
-if [[ ! -x "$observer" ]]; then
-  "$SIM_ROOT/scripts/build-observer.sh"
-fi
+# Always, not only when the binary is missing: cargo is incremental and a
+# stale observer is worse than a few seconds of build. Gating on existence
+# meant a changed observer was silently ignored in favour of the old binary.
+"$SIM_ROOT/scripts/build-observer.sh"
 fleet_started=false
 cleanup() {
   local exit_code=$?

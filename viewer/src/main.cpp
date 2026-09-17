@@ -373,9 +373,11 @@ Color path_color(const ditto::observer::PathType type) {
 const char * transport_label(const std::string & kind) {
   if (kind == "bluetooth") return "BT";
   if (kind == "lan") return "LAN";
+  if (kind == "lan_mdns") return "LAN MDNS";
+  if (kind == "lan_multicast") return "LAN MCAST";
   if (kind == "awdl") return "AWDL";
   if (kind == "wifi_aware") return "WIFI-AW";
-  if (kind == "multicast_beta") return "MCAST";
+  if (kind == "multicast_beta") return "MCAST BETA";
   if (kind == "tcp_connect") return "TCP OUT";
   if (kind == "tcp_listen") return "TCP IN";
   if (kind == "websocket_connect") return "CLOUD";
@@ -391,9 +393,20 @@ const char * transport_label(const std::string & kind) {
 /// offering the control would only earn a FailedPrecondition from Edge Server.
 /// The observer reports the configured endpoints even while a transport is off,
 /// which is what makes the distinction visible here.
-bool transport_actionable(const ditto::observer::TransportStatus & transport) {
+bool transport_actionable(
+  const ditto::observer::TransportStatus & transport, const ditto::observer::Node & node) {
   if (transport.kind == "tcp_connect" || transport.kind == "websocket_connect") {
     return !transport.endpoints.empty();
+  }
+  // LAN discovery only does anything while the LAN transport itself is up.
+  // Offering it otherwise would let someone enable mDNS and watch nothing
+  // happen, which is the confusion these two kinds exist to remove.
+  if (transport.kind == "lan_mdns" || transport.kind == "lan_multicast") {
+    return std::any_of(
+      node.transports.begin(), node.transports.end(),
+      [](const ditto::observer::TransportStatus & sibling) {
+        return sibling.kind == "lan" && sibling.enabled;
+      });
   }
   return true;
 }
@@ -631,8 +644,10 @@ int main(int argc, char ** argv)
         }
       }
     }
-    const float inspector_height = inspected != nullptr && !inspected->transports.empty() ?
-      234.0F : 126.0F;
+    const std::size_t chip_rows = inspected != nullptr && !inspected->transports.empty() ?
+      (inspected->transports.size() + 2) / 3 : 0;
+    const float inspector_height = chip_rows == 0 ? 126.0F :
+      148.0F + 28.0F * static_cast<float>(chip_rows);
     const Rectangle inspector{24.0F, 106.0F, 330.0F, inspector_height};
     const bool pointer_on_inspector = !selected_vehicle.empty() &&
       CheckCollisionPointRec(GetMousePosition(), inspector);
@@ -802,11 +817,11 @@ int main(int argc, char ** argv)
         if (inspected != nullptr && !inspected->transports.empty()) {
           const bool any_unconfigured = std::any_of(
             inspected->transports.begin(), inspected->transports.end(),
-            [](const ditto::observer::TransportStatus & transport) {
-              return !transport_actionable(transport);
+            [&inspected](const ditto::observer::TransportStatus & transport) {
+              return !transport_actionable(transport, *inspected);
             });
           const char * chip_hint = !inspected->reachable ? "TRANSPORTS  (node unreachable)" :
-            any_unconfigured ? "TRANSPORTS  (dimmed: nothing configured to dial)" :
+            any_unconfigured ? "TRANSPORTS  (dimmed: cannot be enabled as configured)" :
             "TRANSPORTS  (click to toggle)";
           draw_text(chip_hint, 38, 230, 12,
             inspected->reachable ? Color{174, 193, 212, 255} : Color{255, 183, 77, 255});
@@ -814,7 +829,7 @@ int main(int argc, char ** argv)
           float chip_y = 248.0F;
           for (const auto & transport : inspected->transports) {
             const Rectangle chip{chip_x, chip_y, 98.0F, 24.0F};
-            const bool actionable = transport_actionable(transport);
+            const bool actionable = transport_actionable(transport, *inspected);
             const Color fill = transport.enabled ? Color{22, 101, 52, 255} :
               (actionable ? Color{55, 65, 81, 255} : Color{39, 44, 54, 255});
             DrawRectangleRounded(chip, 0.25F, 4, fill);
@@ -905,7 +920,7 @@ int main(int argc, char ** argv)
       for (const auto & node : net.snapshot.nodes) {
         if (!node.reachable) continue;
         for (const auto & transport : node.transports) {
-          if (transport.kind == "websocket_connect" && transport_actionable(transport)) {
+          if (transport.kind == "websocket_connect" && transport_actionable(transport, node)) {
             cloud_nodes.push_back(node.node_id);
             break;
           }
