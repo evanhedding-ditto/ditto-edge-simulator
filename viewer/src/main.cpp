@@ -27,6 +27,8 @@
 #include <raylib.h>
 #include <raymath.h>
 
+#include <ditto/observer/client.hpp>
+
 #include <mavlink/common/mavlink.h>
 
 #include <nlohmann/json.hpp>
@@ -344,6 +346,50 @@ void poll_px4(Source & source, WorldOrigin & origin, Snapshot & snapshot)
   append_vehicle(source, snapshot);
 }
 
+/// The observer's latest word on the network.
+///
+/// `connected` tracks whether the watch stream is open, NOT how old the
+/// snapshot is. The observer publishes only when the network changes, so a
+/// settled fleet legitimately sends one snapshot and then nothing; ageing it
+/// out would report a healthy mesh as stale.
+struct NetworkView {
+  ditto::observer::Snapshot snapshot;
+  bool connected{};
+  std::string error;
+};
+
+Color path_color(const ditto::observer::PathType type) {
+  switch (type) {
+    case ditto::observer::PathType::access_point: return {96, 165, 250, 255};
+    case ditto::observer::PathType::p2p_wifi: return {251, 146, 60, 255};
+    case ditto::observer::PathType::bluetooth: return {167, 139, 250, 255};
+    case ditto::observer::PathType::web_socket: return {236, 72, 153, 255};
+    case ditto::observer::PathType::cloud: return {250, 204, 21, 255};
+    case ditto::observer::PathType::unspecified:
+    default: return {148, 163, 184, 255};
+  }
+}
+
+const char * transport_label(const std::string & kind) {
+  if (kind == "bluetooth") return "BT";
+  if (kind == "lan") return "LAN";
+  if (kind == "awdl") return "AWDL";
+  if (kind == "wifi_aware") return "WIFI-AW";
+  if (kind == "multicast_beta") return "MCAST";
+  if (kind == "tcp_connect") return "TCP OUT";
+  if (kind == "tcp_listen") return "TCP IN";
+  if (kind == "websocket_connect") return "CLOUD";
+  if (kind == "http_listen") return "HTTP";
+  return kind.c_str();
+}
+
+/// A stable key for the unordered pair a link joins, so the several transports
+/// between one pair can be spread apart instead of drawn on top of each other.
+std::string pair_key(const ditto::observer::Link & link) {
+  return link.peer_key_1 < link.peer_key_2 ?
+    link.peer_key_1 + "|" + link.peer_key_2 : link.peer_key_2 + "|" + link.peer_key_1;
+}
+
 }  // namespace
 
 int main(int argc, char ** argv)
@@ -352,20 +398,30 @@ int main(int argc, char ** argv)
   std::signal(SIGTERM, request_shutdown);
   std::vector<Source> sources;
   std::string network_metrics;
+  std::string observer_endpoint;
   try {
     for (int index = 1; index < argc; ++index) {
+      if (std::string(argv[index]) == "--observer") {
+        if (++index == argc) throw std::invalid_argument("observer endpoint is required");
+        observer_endpoint = argv[index];
+        continue;
+      }
       if (std::string(argv[index]) == "--network-metrics") {
         if (++index == argc) throw std::invalid_argument("network metrics path is required");
         network_metrics = argv[index];
         continue;
       }
       if (std::string(argv[index]) != "--vehicle" || ++index == argc) {
-        TraceLog(LOG_ERROR, "usage: %s [--network-metrics PATH] --vehicle ID --port PX4_SIH_PORT [...]", argv[0]);
+        TraceLog(LOG_ERROR,
+          "usage: %s [--network-metrics PATH] [--observer ADDR] --vehicle ID --port PX4_SIH_PORT [...]",
+          argv[0]);
         return 2;
       }
       std::string vehicle_id(argv[index]);
       if (++index == argc || std::string(argv[index]) != "--port" || ++index == argc) {
-        TraceLog(LOG_ERROR, "usage: %s [--network-metrics PATH] --vehicle ID --port PX4_SIH_PORT [...]", argv[0]);
+        TraceLog(LOG_ERROR,
+          "usage: %s [--network-metrics PATH] [--observer ADDR] --vehicle ID --port PX4_SIH_PORT [...]",
+          argv[0]);
         return 2;
       }
       const auto port = std::stoul(argv[index]);
@@ -418,11 +474,89 @@ int main(int argc, char ** argv)
     }
   });
 
+  // The network observer. Optional: without --observer the viewer behaves as
+  // before and simply draws no overlay.
+  std::mutex network_mutex;
+  NetworkView network;
+  std::mutex stream_mutex;
+  std::shared_ptr<ditto::observer::SnapshotStream> active_stream;
+  std::thread observer_watcher;
+  if (!observer_endpoint.empty()) {
+    observer_watcher = std::thread([&]() {
+      // One client for the process; its channel reconnects on its own, so only
+      // the stream is rebuilt after a failure.
+      ditto::observer::Client client(observer_endpoint);
+      while (!stopping.load()) {
+        auto stream = std::shared_ptr<ditto::observer::SnapshotStream>(client.watch(250));
+        {
+          std::lock_guard<std::mutex> lock(stream_mutex);
+          active_stream = stream;
+        }
+        ditto::observer::Snapshot snapshot;
+        bool delivered = false;
+        while (!stopping.load() && stream->read(snapshot)) {
+          delivered = true;
+          std::lock_guard<std::mutex> lock(network_mutex);
+          network.snapshot = snapshot;
+          network.connected = true;
+          network.error.clear();
+        }
+        const auto status = stream->finish();
+        {
+          std::lock_guard<std::mutex> lock(stream_mutex);
+          active_stream.reset();
+        }
+        {
+          std::lock_guard<std::mutex> lock(network_mutex);
+          network.connected = false;
+          if (!stopping.load()) {
+            network.error = status.ok() ?
+              (delivered ? "observer stream ended" : "observer sent nothing") :
+              status.error_message();
+          }
+        }
+        for (int attempt = 0; attempt < 10 && !stopping.load(); ++attempt) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+      }
+    });
+  }
+
+  // Applying a change to twenty-one nodes took about a third of a second, so
+  // it runs off the render thread. Everything is copied in: the thread may
+  // outlive the click that started it.
+  const auto send_toggle = [&observer_endpoint](
+    std::vector<std::string> node_ids, std::string kind, const bool enabled) {
+      if (observer_endpoint.empty()) return;
+      std::thread(
+        [endpoint = observer_endpoint, node_ids = std::move(node_ids), kind = std::move(kind),
+          enabled]() {
+          ditto::observer::Client client(endpoint, std::chrono::seconds(30));
+          std::vector<ditto::observer::TransportResult> results;
+          const auto status = client.set_transports(node_ids, {{kind, enabled}}, results);
+          if (!status.ok()) {
+            TraceLog(LOG_WARNING, "transport change refused: %s", status.error_message().c_str());
+            return;
+          }
+          for (const auto & result : results) {
+            if (!result.applied) {
+              TraceLog(LOG_WARNING, "%s: %s", result.node_id.c_str(), result.error.c_str());
+            }
+          }
+        })
+        .detach();
+    };
+
   SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
   InitWindow(1200, 800, "Ditto Edge Simulator — MVP Fleet");
   if (!IsWindowReady()) {
     TraceLog(LOG_ERROR, "could not create viewer window");
     stopping.store(true);
+    {
+      std::lock_guard<std::mutex> lock(stream_mutex);
+      if (active_stream) active_stream->cancel();
+    }
+    if (observer_watcher.joinable()) observer_watcher.join();
     poller.join();
     return 1;
   }
@@ -449,16 +583,57 @@ int main(int argc, char ** argv)
   std::unordered_map<std::string, NetworkStatus> link_status;
   auto next_metrics_read = Clock::now();
   std::string selected_vehicle;
+  // A frame-local copy of the observer's view, refreshed only when it changes.
+  NetworkView net;
+  bool net_ever_seen = false;
+  // Writes one PNG once the overlay has data, for checking the render without
+  // a person at the screen. Unset in normal use. raylib joins this onto its
+  // working directory, so it must be RELATIVE -- an absolute path silently
+  // fails to save.
+  const char * capture_path = std::getenv("SIM_VIEWER_CAPTURE");
+  bool captured = false;
+  int settle_frames = 0;
 
   while (!shutdown_requested && !WindowShouldClose()) {
+    {
+      std::lock_guard<std::mutex> lock(network_mutex);
+      if (network.snapshot.observed_unix_ms != net.snapshot.observed_unix_ms ||
+        network.connected != net.connected || network.error != net.error)
+      {
+        net = network;
+        net_ever_seen = net_ever_seen || net.snapshot.observed_unix_ms != 0;
+      }
+    }
+
+    // The node inspector accepts clicks, so its rectangle has to be known
+    // before the camera decides a left-drag is a pan.
+    const ditto::observer::Node * inspected = nullptr;
+    if (!selected_vehicle.empty()) {
+      for (const auto & node : net.snapshot.nodes) {
+        if (node.node_id == selected_vehicle) {
+          inspected = &node;
+          break;
+        }
+      }
+    }
+    const float inspector_height = inspected != nullptr && !inspected->transports.empty() ?
+      234.0F : 126.0F;
+    const Rectangle inspector{24.0F, 106.0F, 330.0F, inspector_height};
+    const bool pointer_on_inspector = !selected_vehicle.empty() &&
+      CheckCollisionPointRec(GetMousePosition(), inspector);
+
     const float sidebar_width = std::clamp(GetScreenWidth() * 0.30F, 280.0F, 340.0F);
     const float sidebar_left = static_cast<float>(GetScreenWidth()) - sidebar_width;
-    if (GetMousePosition().x < sidebar_left && IsMouseButtonDown(MOUSE_BUTTON_RIGHT)) {
+    if (!pointer_on_inspector && GetMousePosition().x < sidebar_left &&
+      IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
+    {
       const auto delta = GetMouseDelta();
       yaw -= delta.x * 0.006F;
       pitch = std::clamp(pitch + delta.y * 0.006F, 0.12F, 1.35F);
     }
-    if (GetMousePosition().x < sidebar_left && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+    if (!pointer_on_inspector && GetMousePosition().x < sidebar_left &&
+      IsMouseButtonDown(MOUSE_BUTTON_LEFT))
+    {
       const auto delta = GetMouseDelta();
       const Vector3 position{
         camera.target.x + std::sin(yaw) * std::cos(pitch) * distance,
@@ -522,6 +697,65 @@ int main(int argc, char ** argv)
       const Vector3 position{vehicle.east_m, -vehicle.down_m, vehicle.north_m};
       draw_drone(vehicle, position);
     }
+
+    // The network the observer reports, drawn over the fleet.
+    std::unordered_map<std::string, Vector3> node_positions;
+    if (net_ever_seen) {
+      for (const auto & [id, vehicle] : visible) {
+        node_positions[id] = {vehicle.east_m, -vehicle.down_m, vehicle.north_m};
+      }
+      // Nodes with no vehicle of their own -- the operator, normally. Spread
+      // them on a small ring at the origin so several never sit on one spot.
+      std::size_t placed = 0;
+      for (const auto & node : net.snapshot.nodes) {
+        if (node_positions.count(node.node_id) != 0) continue;
+        const float angle = static_cast<float>(placed) * 1.2F;
+        node_positions[node.node_id] = {std::sin(angle) * 4.0F, 1.0F, std::cos(angle) * 4.0F};
+        DrawCube(node_positions[node.node_id], 1.6F, 1.6F, 1.6F, {148, 163, 184, 255});
+        DrawCubeWires(node_positions[node.node_id], 1.6F, 1.6F, 1.6F, RAYWHITE);
+        ++placed;
+      }
+
+      std::unordered_map<std::string, std::string> peer_to_node;
+      for (const auto & node : net.snapshot.nodes) {
+        if (!node.peer_key.empty()) peer_to_node[node.peer_key] = node.node_id;
+      }
+
+      // Several transports between one pair must not be drawn on top of each
+      // other, so each gets its own lane, offset across the pair's axis. Link
+      // order is stable, so a lane does not change between frames.
+      std::unordered_map<std::string, int> lanes;
+      for (const auto & link : net.snapshot.links) {
+        if (link.type == ditto::observer::PathType::cloud) continue;
+        const auto first = peer_to_node.find(link.peer_key_1);
+        const auto second = peer_to_node.find(link.peer_key_2);
+        if (first == peer_to_node.end() || second == peer_to_node.end()) continue;
+        const auto from = node_positions.find(first->second);
+        const auto to = node_positions.find(second->second);
+        if (from == node_positions.end() || to == node_positions.end()) continue;
+
+        const int lane = lanes[pair_key(link)]++;
+        const Vector3 axis = Vector3Subtract(to->second, from->second);
+        Vector3 across = Vector3Normalize({-axis.z, 0.0F, axis.x});
+        if (!std::isfinite(across.x) || !std::isfinite(across.z)) across = {1.0F, 0.0F, 0.0F};
+        const float step = lane == 0 ? 0.0F :
+          (lane % 2 == 1 ? 1.0F : -1.0F) * 0.8F * static_cast<float>((lane + 1) / 2);
+        const Vector3 shift = Vector3Scale(across, step);
+        DrawLine3D(Vector3Add(from->second, shift), Vector3Add(to->second, shift),
+          path_color(link.type));
+      }
+
+      // The cloud link has no second endpoint, so it is a property of a node
+      // rather than an edge: a stalk rising out of whoever holds one.
+      for (const auto & node : net.snapshot.nodes) {
+        if (!node.connected_to_cloud) continue;
+        const auto position = node_positions.find(node.node_id);
+        if (position == node_positions.end()) continue;
+        const Vector3 top = Vector3Add(position->second, {0.0F, 6.0F, 0.0F});
+        DrawLine3D(position->second, top, path_color(ditto::observer::PathType::cloud));
+        DrawSphere(top, 0.45F, path_color(ditto::observer::PathType::cloud));
+      }
+    }
     EndMode3D();
     EndScissorMode();
 
@@ -530,7 +764,7 @@ int main(int argc, char ** argv)
       if (vehicle != snapshot.vehicles.end()) {
         const auto status = link_status.find(selected_vehicle);
         const auto age = std::max<std::int64_t>(0, now - vehicle->second.published_unix_ms);
-        DrawRectangleRounded({24.0F, 106.0F, 330.0F, 126.0F}, 0.08F, 6, {30, 41, 59, 238});
+        DrawRectangleRounded(inspector, 0.08F, 6, {30, 41, 59, 238});
         draw_text("NODE INSPECTOR", 38, 118, 16, RAYWHITE);
         draw_text(selected_vehicle.c_str(), 38, 141, 18, {101, 214, 159, 255});
         draw_text(TextFormat("PX4  %s   telemetry age  %lld ms",
@@ -547,11 +781,43 @@ int main(int argc, char ** argv)
             status->second.rx_bps / 1000.0, status->second.rx_utilization),
             38, 208, 13, {174, 193, 212, 255});
         }
+
+        // Transports, as the observer reports them for this node. Clicking one
+        // asks the observer to enable or disable it on this node alone.
+        if (inspected != nullptr && !inspected->transports.empty()) {
+          draw_text(inspected->reachable ? "TRANSPORTS  (click to toggle)" :
+            "TRANSPORTS  (node unreachable)", 38, 230, 12,
+            inspected->reachable ? Color{174, 193, 212, 255} : Color{255, 183, 77, 255});
+          float chip_x = 38.0F;
+          float chip_y = 248.0F;
+          for (const auto & transport : inspected->transports) {
+            const Rectangle chip{chip_x, chip_y, 98.0F, 24.0F};
+            const Color fill = transport.enabled ? Color{22, 101, 52, 255} :
+              Color{55, 65, 81, 255};
+            DrawRectangleRounded(chip, 0.25F, 4, fill);
+            if (transport.enabled) {
+              DrawRectangleRoundedLines(chip, 0.25F, 4, {101, 214, 159, 255});
+            }
+            draw_text(transport_label(transport.kind), chip.x + 8.0F, chip.y + 5.0F, 12,
+              transport.enabled ? RAYWHITE : Color{148, 163, 184, 255});
+            if (inspected->reachable && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
+              CheckCollisionPointRec(GetMousePosition(), chip))
+            {
+              send_toggle({inspected->node_id}, transport.kind, !transport.enabled);
+            }
+            chip_x += 102.0F;
+            if (chip_x > 38.0F + 2.0F * 102.0F) {
+              chip_x = 38.0F;
+              chip_y += 28.0F;
+            }
+          }
+        }
       }
     }
 
     draw_text("DITTO EDGE SIMULATOR — LIVE PX4 FLEET", 24, 20, 24, {30, 41, 59, 255});
-    draw_text("Left-drag: pan   Right-drag: orbit   Wheel: zoom   F: reset", 24, 50, 16, GRAY);
+    draw_text("Left-drag: pan   Right-drag: orbit   Wheel: zoom   F: reset   "
+      "Click a node, then a transport chip", 24, 50, 16, GRAY);
     draw_text(live ? "LIVE" : "WAITING FOR VEHICLE STATE", 24, 78, 18,
       live ? DARKGREEN : MAROON);
 
@@ -604,13 +870,79 @@ int main(int argc, char ** argv)
       }
       row += row_height;
     }
+    // What the observer says the network is, and the one control that makes
+    // the point: the cloud is a path nobody configured a mesh for.
+    if (!observer_endpoint.empty()) {
+      const float legend_height = 78.0F + 16.0F * static_cast<float>(
+        std::max<std::size_t>(1, net.snapshot.links_by_type.size()));
+      const float legend_top = static_cast<float>(GetScreenHeight()) - 60.0F - legend_height;
+      DrawRectangleRounded({24.0F, legend_top, 300.0F, legend_height}, 0.06F, 6,
+        {30, 41, 59, 238});
+      draw_text("NETWORK OBSERVER", 38, legend_top + 10.0F, 15, RAYWHITE);
+      const char * state = net.connected ? "WATCHING" :
+        (net.error.empty() ? "CONNECTING" : net.error.c_str());
+      draw_text(state, 38, legend_top + 30.0F, 12,
+        net.connected ? Color{101, 214, 159, 255} : Color{255, 183, 77, 255});
+
+      float legend_row = legend_top + 48.0F;
+      if (net.snapshot.links_by_type.empty()) {
+        draw_text("no links reported", 38, legend_row, 12, {148, 163, 184, 255});
+        legend_row += 16.0F;
+      }
+      for (const auto & [kind, count] : net.snapshot.links_by_type) {
+        auto type = ditto::observer::PathType::unspecified;
+        if (kind == "bluetooth") type = ditto::observer::PathType::bluetooth;
+        else if (kind == "access_point") type = ditto::observer::PathType::access_point;
+        else if (kind == "p2p_wifi") type = ditto::observer::PathType::p2p_wifi;
+        else if (kind == "web_socket") type = ditto::observer::PathType::web_socket;
+        else if (kind == "cloud") type = ditto::observer::PathType::cloud;
+        DrawRectangle(38, static_cast<int>(legend_row) + 3, 10, 10, path_color(type));
+        draw_text(TextFormat("%s  %u", kind.c_str(), count), 54, legend_row, 12,
+          {223, 232, 242, 255});
+        legend_row += 16.0F;
+      }
+      if (!net.snapshot.warnings.empty()) {
+        draw_text(TextFormat("%d warning(s)", static_cast<int>(net.snapshot.warnings.size())),
+          170, legend_top + 30.0F, 12, ORANGE);
+      }
+
+      // Fleet-wide cloud control. The cloud carried an entire twenty-node run
+      // once while the mesh looked healthy, so being able to cut it from here
+      // is the demonstration, not a convenience.
+      const bool any_cloud = net.snapshot.links_by_type.count("cloud") != 0;
+      const Rectangle fleet_button{38.0F, legend_top + legend_height - 32.0F, 172.0F, 24.0F};
+      DrawRectangleRounded(fleet_button, 0.25F, 4,
+        any_cloud ? Color{127, 29, 29, 255} : Color{22, 101, 52, 255});
+      draw_text(any_cloud ? "CUT CLOUD, WHOLE FLEET" : "RESTORE CLOUD, FLEET", fleet_button.x + 10.0F,
+        fleet_button.y + 5.0F, 12, RAYWHITE);
+      if (net.connected && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
+        CheckCollisionPointRec(GetMousePosition(), fleet_button))
+      {
+        send_toggle({}, "websocket_connect", !any_cloud);
+      }
+    }
+
     if (!snapshot.error.empty()) {
       draw_text(snapshot.error.c_str(), 24, static_cast<float>(GetScreenHeight() - 48), 14, MAROON);
     }
     EndDrawing();
+
+    if (capture_path != nullptr && !captured && net_ever_seen && ++settle_frames > 90) {
+      TakeScreenshot(capture_path);
+      captured = true;
+      TraceLog(LOG_INFO, "wrote %s", capture_path);
+    }
   }
 
   stopping.store(true);
+  // A settled network is silent for as long as it stays settled, so the
+  // watcher is parked in a blocking read and has to be cancelled rather than
+  // waited out.
+  {
+    std::lock_guard<std::mutex> lock(stream_mutex);
+    if (active_stream) active_stream->cancel();
+  }
+  if (observer_watcher.joinable()) observer_watcher.join();
   poller.join();
   UnloadFont(ui_font);
   CloseWindow();
