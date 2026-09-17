@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# A scenario may be named as the first argument -- `pixi run sim
+# synthetic-twenty` -- which beats having to spell out SIM_SCENARIO_FILE. A
+# bare name resolves against scenarios/, and a path is taken as given.
+if [[ $# -gt 0 ]]; then
+  if [[ -r "$1" ]]; then
+    SIM_SCENARIO_FILE="$1"
+  else
+    SIM_SCENARIO_FILE="$(cd "$(dirname "$0")/.." && pwd)/scenarios/${1%.env}.env"
+  fi
+  export SIM_SCENARIO_FILE
+  shift
+fi
+
 source "$(dirname "$0")/lib.sh"
 sim_init
 
@@ -21,6 +34,10 @@ if [[ ! -x "$viewer" || ! -x "$telemetry_probe" || ! -x "$network_relay" || "$SI
   "$SIM_ROOT/tools/px4_telemetry_ready.cpp" -nt "$telemetry_probe" ]]
 then
   "$SIM_ROOT/scripts/build-viewer.sh"
+fi
+observer="$SIM_EDGE_ADAPTERS_ROOT/target/release/ditto-network-observer"
+if [[ ! -x "$observer" ]]; then
+  "$SIM_ROOT/scripts/build-observer.sh"
 fi
 fleet_started=false
 cleanup() {

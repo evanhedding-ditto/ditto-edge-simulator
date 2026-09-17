@@ -99,3 +99,8 @@ processes:
   mavlink-px4-17: {command: ./scripts/run-mavlink-adapter.sh 17, depends_on: {edge-px4-17: {condition: process_started}, sih-px4-17: {condition: process_started}}, availability: {restart: always}}
   mavlink-px4-18: {command: ./scripts/run-mavlink-adapter.sh 18, depends_on: {edge-px4-18: {condition: process_started}, sih-px4-18: {condition: process_started}}, availability: {restart: always}}
   mavlink-px4-19: {command: ./scripts/run-mavlink-adapter.sh 19, depends_on: {edge-px4-19: {condition: process_started}, sih-px4-19: {condition: process_started}}, availability: {restart: always}}
+  observer:
+    command: ./scripts/run-observer.sh
+    depends_on:
+      edge-operator: { condition: process_started }
+    availability: { restart: always }

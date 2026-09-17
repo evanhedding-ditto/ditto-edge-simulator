@@ -19,6 +19,6 @@ for ((index = 0; index < SIM_VEHICLE_COUNT; ++index)); do
   arguments+=(--node "$(node_socket "px4_$index")")
 done
 arguments+=(--node "$(node_socket operator)")
-arguments+=(--listen "${SIM_OBSERVER_ADDR:-127.0.0.1:50090}")
+arguments+=(--listen "$SIM_OBSERVER_ADDR")
 
 exec "$binary" "${arguments[@]}"

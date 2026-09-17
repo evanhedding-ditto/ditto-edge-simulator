@@ -5,6 +5,10 @@ platforms = ["osx-arm64"]
 version = "0.1.0"
 
 [tasks]
+# `sim` takes a scenario name: `pixi run sim synthetic-twenty`. The tasks below
+# are shortcuts for the ones in regular use.
 sim = "./scripts/sim.sh"
+sim-twenty = "./scripts/sim.sh synthetic-twenty"
+sim-hundred = "./scripts/sim.sh synthetic-hundred"
 sim-down = "./scripts/down.sh"
 sim-status = "./scripts/status.sh"

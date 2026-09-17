@@ -18,6 +18,11 @@ sim_init() {
   [[ -n "${SIM_SCENARIO_ID:-}" ]] || die "scenario defines no SIM_SCENARIO_ID: $SIM_SCENARIO_FILE"
   SIM_RUNTIME_DIR="$SIM_ROOT/build/runtime/$SIM_SCENARIO_ID"
   : "${DITTO_EDGE_ENV_FILE:=$SIM_ROOT/.env}"
+  # The network observer's API. One address shared by the observer process, the
+  # viewer and any ad-hoc client, so they cannot disagree. Only one simulator
+  # session runs at a time, so a fixed port is safe.
+  : "${SIM_OBSERVER_ADDR:=127.0.0.1:50090}"
+  export SIM_OBSERVER_ADDR
   export SIM_ROOT SIM_SCENARIO_FILE SIM_PROTOTYPE_ROOT SIM_PX4_ROOT
   export SIM_EDGE_ADAPTERS_ROOT SIM_EDGE_SERVER_ROOT SIM_RUNTIME_DIR
 }

@@ -383,6 +383,21 @@ const char * transport_label(const std::string & kind) {
   return kind.c_str();
 }
 
+/// Whether a transport can be switched on at all.
+///
+/// The two dialing kinds are live exactly when they have somewhere to dial, and
+/// their addresses come from the configuration the node started with. A node
+/// that was never given a cloud URL cannot be told to go and connect to one, so
+/// offering the control would only earn a FailedPrecondition from Edge Server.
+/// The observer reports the configured endpoints even while a transport is off,
+/// which is what makes the distinction visible here.
+bool transport_actionable(const ditto::observer::TransportStatus & transport) {
+  if (transport.kind == "tcp_connect" || transport.kind == "websocket_connect") {
+    return !transport.endpoints.empty();
+  }
+  return true;
+}
+
 /// A stable key for the unordered pair a link joins, so the several transports
 /// between one pair can be spread apart instead of drawn on top of each other.
 std::string pair_key(const ditto::observer::Link & link) {
@@ -785,22 +800,32 @@ int main(int argc, char ** argv)
         // Transports, as the observer reports them for this node. Clicking one
         // asks the observer to enable or disable it on this node alone.
         if (inspected != nullptr && !inspected->transports.empty()) {
-          draw_text(inspected->reachable ? "TRANSPORTS  (click to toggle)" :
-            "TRANSPORTS  (node unreachable)", 38, 230, 12,
+          const bool any_unconfigured = std::any_of(
+            inspected->transports.begin(), inspected->transports.end(),
+            [](const ditto::observer::TransportStatus & transport) {
+              return !transport_actionable(transport);
+            });
+          const char * chip_hint = !inspected->reachable ? "TRANSPORTS  (node unreachable)" :
+            any_unconfigured ? "TRANSPORTS  (dimmed: nothing configured to dial)" :
+            "TRANSPORTS  (click to toggle)";
+          draw_text(chip_hint, 38, 230, 12,
             inspected->reachable ? Color{174, 193, 212, 255} : Color{255, 183, 77, 255});
           float chip_x = 38.0F;
           float chip_y = 248.0F;
           for (const auto & transport : inspected->transports) {
             const Rectangle chip{chip_x, chip_y, 98.0F, 24.0F};
+            const bool actionable = transport_actionable(transport);
             const Color fill = transport.enabled ? Color{22, 101, 52, 255} :
-              Color{55, 65, 81, 255};
+              (actionable ? Color{55, 65, 81, 255} : Color{39, 44, 54, 255});
             DrawRectangleRounded(chip, 0.25F, 4, fill);
             if (transport.enabled) {
               DrawRectangleRoundedLines(chip, 0.25F, 4, {101, 214, 159, 255});
             }
+            const Color label_color = transport.enabled ? RAYWHITE :
+              (actionable ? Color{148, 163, 184, 255} : Color{88, 97, 112, 255});
             draw_text(transport_label(transport.kind), chip.x + 8.0F, chip.y + 5.0F, 12,
-              transport.enabled ? RAYWHITE : Color{148, 163, 184, 255});
-            if (inspected->reachable && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
+              label_color);
+            if (inspected->reachable && actionable && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
               CheckCollisionPointRec(GetMousePosition(), chip))
             {
               send_toggle({inspected->node_id}, transport.kind, !transport.enabled);
@@ -873,8 +898,25 @@ int main(int argc, char ** argv)
     // What the observer says the network is, and the one control that makes
     // the point: the cloud is a path nobody configured a mesh for.
     if (!observer_endpoint.empty()) {
-      const float legend_height = 78.0F + 16.0F * static_cast<float>(
-        std::max<std::size_t>(1, net.snapshot.links_by_type.size()));
+      // Only nodes that were started with a cloud URL can be told to use one,
+      // so they are the only ones the fleet button addresses. Sending to the
+      // whole fleet would earn a FailedPrecondition from every node with none.
+      std::vector<std::string> cloud_nodes;
+      for (const auto & node : net.snapshot.nodes) {
+        if (!node.reachable) continue;
+        for (const auto & transport : node.transports) {
+          if (transport.kind == "websocket_connect" && transport_actionable(transport)) {
+            cloud_nodes.push_back(node.node_id);
+            break;
+          }
+        }
+      }
+
+      // Sized before anything is drawn, because the unconfigured case needs a
+      // second line and would otherwise spill past the panel.
+      const bool cloud_available = !cloud_nodes.empty();
+      const float legend_height = (cloud_available ? 92.0F : 110.0F) +
+        16.0F * static_cast<float>(std::max<std::size_t>(1, net.snapshot.links_by_type.size()));
       const float legend_top = static_cast<float>(GetScreenHeight()) - 60.0F - legend_height;
       DrawRectangleRounded({24.0F, legend_top, 300.0F, legend_height}, 0.06F, 6,
         {30, 41, 59, 238});
@@ -910,15 +952,28 @@ int main(int argc, char ** argv)
       // once while the mesh looked healthy, so being able to cut it from here
       // is the demonstration, not a convenience.
       const bool any_cloud = net.snapshot.links_by_type.count("cloud") != 0;
-      const Rectangle fleet_button{38.0F, legend_top + legend_height - 32.0F, 172.0F, 24.0F};
-      DrawRectangleRounded(fleet_button, 0.25F, 4,
-        any_cloud ? Color{127, 29, 29, 255} : Color{22, 101, 52, 255});
-      draw_text(any_cloud ? "CUT CLOUD, WHOLE FLEET" : "RESTORE CLOUD, FLEET", fleet_button.x + 10.0F,
-        fleet_button.y + 5.0F, 12, RAYWHITE);
-      if (net.connected && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
-        CheckCollisionPointRec(GetMousePosition(), fleet_button))
-      {
-        send_toggle({}, "websocket_connect", !any_cloud);
+      const float button_top = cloud_available ? legend_height - 32.0F : legend_height - 50.0F;
+      const Rectangle fleet_button{38.0F, legend_top + button_top, 240.0F, 24.0F};
+      if (!cloud_available) {
+        // Nothing to offer: say why rather than presenting a control that
+        // cannot work.
+        DrawRectangleRounded(fleet_button, 0.25F, 4, {39, 44, 54, 255});
+        draw_text("NO CLOUD CONFIGURED", fleet_button.x + 10.0F, fleet_button.y + 5.0F, 12,
+          {88, 97, 112, 255});
+        draw_text("start with SIM_ENABLE_CLOUD_SYNC=1", fleet_button.x + 10.0F,
+          fleet_button.y + 26.0F, 11, {88, 97, 112, 255});
+      } else {
+        DrawRectangleRounded(fleet_button, 0.25F, 4,
+          any_cloud ? Color{127, 29, 29, 255} : Color{22, 101, 52, 255});
+        draw_text(
+          any_cloud ? TextFormat("CUT CLOUD ON %d NODES", static_cast<int>(cloud_nodes.size())) :
+            TextFormat("RESTORE CLOUD ON %d NODES", static_cast<int>(cloud_nodes.size())),
+          fleet_button.x + 10.0F, fleet_button.y + 5.0F, 12, RAYWHITE);
+        if (net.connected && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
+          CheckCollisionPointRec(GetMousePosition(), fleet_button))
+        {
+          send_toggle(cloud_nodes, "websocket_connect", !any_cloud);
+        }
       }
     }
 

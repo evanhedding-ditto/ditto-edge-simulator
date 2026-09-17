@@ -46,3 +46,8 @@ processes:
       edge-px4-1: { condition: process_started }
       sih-px4-1: { condition: process_started }
     availability: { restart: always }
+  observer:
+    command: ./scripts/run-observer.sh
+    depends_on:
+      edge-operator: { condition: process_started }
+    availability: { restart: always }

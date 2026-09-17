@@ -209,3 +209,47 @@ its own MAVLink stream and is visible to its corresponding adapter. Those stream
 The viewer fixes its horizontal origin to the configured PX4 home position and uses a wider map
 for fleets larger than four, so restarting the viewer after vehicles have moved does not displace
 the fleet.
+
+### Synthetic fleets, and the network observer
+
+A scenario can be named as an argument, which is shorter than spelling out
+`SIM_SCENARIO_FILE`:
+
+```bash
+pixi run sim synthetic-twenty
+```
+
+The two in regular use have their own tasks:
+
+```bash
+pixi run sim-twenty
+pixi run sim-hundred
+```
+
+A synthetic scenario replaces the whole autopilot and adapter tier with one
+kinematic process, so twenty vehicles cost twenty-one Edge Servers plus three
+processes instead of seventy-two. The Edge Servers are the thing under test and
+are still real, one per vehicle.
+
+**The network observer starts with the fleet.** It is a process in the same
+process-compose session, so it comes up with everything else and
+`pixi run sim-down` — or simply closing the viewer — stops it. It reports every
+transport path each node is using and can disable individual paths on command,
+which the viewer draws as links coloured per transport, with a per-node chip to
+toggle one and a fleet-wide button for the cloud.
+
+Every client shares one address, `SIM_OBSERVER_ADDR`, default
+`127.0.0.1:50090`. Query it without the viewer using either reference client:
+
+```bash
+../Ditto-Edge-Server/ditto-edge-adapters/target/debug/examples/netctl show
+build/cmake/ditto_observer_client/ditto_observer_ctl show
+```
+
+Two things the default deliberately does not do. The fleet **does not move
+until it is commanded**, so the links all sit on the origin until you run
+`./scripts/demo-twenty_spread.sh`. And the **Ditto Cloud link is off**; start
+with `SIM_ENABLE_CLOUD_SYNC=1` to see it, at which point the observer draws a
+stalk on every node that holds one. Cloud paths never appear in a presence
+graph's connections, so the observer synthesises those edges from each peer's
+`is_connected_to_ditto_cloud` flag rather than leaving them out.

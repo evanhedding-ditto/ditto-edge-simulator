@@ -20,5 +20,5 @@ done
 arguments+=(--network-metrics "$SIM_RUNTIME_DIR/network-metrics.json")
 # The network observer. Harmless when it is not running: the viewer reports
 # CONNECTING and draws no overlay.
-arguments+=(--observer "${SIM_OBSERVER_ADDR:-127.0.0.1:50090}")
+arguments+=(--observer "$SIM_OBSERVER_ADDR")
 exec "$viewer" "${arguments[@]}"

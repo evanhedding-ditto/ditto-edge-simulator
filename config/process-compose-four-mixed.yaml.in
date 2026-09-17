@@ -45,3 +45,8 @@ processes:
     command: ./scripts/run-mavlink-adapter.sh 3
     depends_on: {edge-px4-3: {condition: process_started}, sih-px4-3: {condition: process_started}}
     availability: {restart: always}
+  observer:
+    command: ./scripts/run-observer.sh
+    depends_on:
+      edge-operator: { condition: process_started }
+    availability: { restart: always }

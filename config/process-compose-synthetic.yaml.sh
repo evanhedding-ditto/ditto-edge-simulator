@@ -37,3 +37,10 @@ printf '    availability: {restart: always}\n'
 printf '\n  synthetic-fleet:\n    command: ./scripts/run-synthetic-fleet.sh\n    depends_on:\n'
 printf '      edge-operator: {condition: process_started}\n'
 printf '    availability: {restart: always}\n'
+
+# The network observer. It holds a presence stream open per node and tolerates
+# a socket that does not exist yet, so it can start as soon as the servers are
+# execed rather than waiting for every one of them to bind.
+printf '\n  observer:\n    command: ./scripts/run-observer.sh\n    depends_on:\n'
+printf '      edge-operator: {condition: process_started}\n'
+printf '    availability: {restart: always}\n'
