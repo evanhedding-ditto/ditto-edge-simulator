@@ -203,9 +203,17 @@ std::int64_t unix_ms()
   return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
-void write_metrics(const Arguments & args, const std::vector<Link> & links)
+// `observed_unix_ms` is passed in rather than read here, because it has to mark
+// when the sample window closed, not when this function got around to writing.
+// Reading the clock at write time made the published interval jitter by however
+// long the surrounding poll iteration took, on both sides: measured on a live
+// twenty-node fleet, a loop intending one second published at anywhere from
+// 631 ms to 1588 ms apart. Consumers judge staleness from this field, so that
+// jitter became their problem.
+void write_metrics(
+  const Arguments & args, const std::vector<Link> & links, const std::int64_t observed_unix_ms)
 {
-  nlohmann::json document{{"schema", "ditto.sim_network.v2"}, {"observed_unix_ms", unix_ms()},
+  nlohmann::json document{{"schema", "ditto.sim_network.v2"}, {"observed_unix_ms", observed_unix_ms},
     {"capacity_bps", args.capacity_bps}, {"links", nlohmann::json::array()}};
   for (const auto & link : links) {
     const double capacity = static_cast<double>(args.capacity_bps);
@@ -303,13 +311,14 @@ int main(int argc, char ** argv)
         }
       }
       if (now - sampled >= std::chrono::seconds(1)) {
+        const auto observed = unix_ms();
         const double seconds = std::chrono::duration<double>(now - sampled).count();
         for (auto & link : links) {
           link.destination_bps = 8.0 * (link.destination_bytes - link.sampled_destination_bytes) / seconds;
           link.source_bps = 8.0 * (link.source_bytes - link.sampled_source_bytes) / seconds;
           link.sampled_destination_bytes = link.destination_bytes; link.sampled_source_bytes = link.source_bytes;
         }
-        write_metrics(args, links); sampled = now;
+        write_metrics(args, links, observed); sampled = now;
       }
     }
     for (auto & link : links) { disconnect(link); close_fd(link.listener); }

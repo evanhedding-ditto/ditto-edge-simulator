@@ -3,3 +3,6 @@
 /CMakeFiles/
 /.DS_Store
 /kbd.db*
+/deps/
+/bin/*
+!/bin/README.md

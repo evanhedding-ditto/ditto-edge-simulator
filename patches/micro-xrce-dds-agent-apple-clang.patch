@@ -1,0 +1,90 @@
+# Micro XRCE-DDS Agent v2.4.3 does not compile with Apple clang.
+#
+# Four constructors initialise callback_factory_ from callback_factory_.getInstance()
+# -- reading a member through itself before it is initialised, which is undefined
+# behaviour that Apple clang rejects outright. Replaced with a direct call to
+# middleware::CallbackFactory::getInstance(). The trailing-newline hunks are
+# incidental.
+#
+# This is a genuine upstream defect and should be filed with eProsima rather than
+# carried here indefinitely. Upstream has since released v3.0.x, which may fix it
+# -- but v3 is NOT a drop-in: UAGENT_USE_SYSTEM_FASTDDS=ON binds the agent to the
+# Fast DDS that ROS 2 Jazzy ships (2.x), and the XRCE participant behaviour at
+# v2.4.3 was expensively root-caused (see UXRCE_DDS_PTCFG in DEBUGGING.md).
+# Upgrade the agent as its own change, with its own validation, or not at all.
+#
+# Applied by scripts/build/xrce-agent.sh.
+
+diff --git a/src/cpp/Agent.cpp b/src/cpp/Agent.cpp
+index 575d4e3..b21ce40 100644
+--- a/src/cpp/Agent.cpp
++++ b/src/cpp/Agent.cpp
+@@ -214,7 +214,7 @@ void fill_object_variant<Agent::REPLIER_OBJK>(
+  **********************************************************************************************************************/
+ Agent::Agent()
+     : root_(new Root())
+-    , callback_factory_(callback_factory_.getInstance())
++    , callback_factory_(middleware::CallbackFactory::getInstance())
+ {}
+ 
+ Agent::~Agent() = default;
+diff --git a/src/cpp/AgentInstance.cpp b/src/cpp/AgentInstance.cpp
+index df551dc..ef74f11 100644
+--- a/src/cpp/AgentInstance.cpp
++++ b/src/cpp/AgentInstance.cpp
+@@ -20,6 +20,6 @@ namespace eprosima {
+ namespace uxr {
+ 
+ AgentInstance::AgentInstance()
+-    : callback_factory_(callback_factory_.getInstance())
++    : callback_factory_(middleware::CallbackFactory::getInstance())
+ {
+ }
+@@ -173,4 +173,4 @@ AGENTINSTANCE_ADD_MW_CB(
+ #endif  // UAGENT_FAST_PROFILE
+ 
+ } // namespace uxr
+-} // namespace eprosima
+\ No newline at end of file
++} // namespace eprosima
+diff --git a/src/cpp/middleware/fast/FastMiddleware.cpp b/src/cpp/middleware/fast/FastMiddleware.cpp
+index e8c4afd..1a9ec38 100644
+--- a/src/cpp/middleware/fast/FastMiddleware.cpp
++++ b/src/cpp/middleware/fast/FastMiddleware.cpp
+@@ -33,6 +33,6 @@ FastMiddleware::FastMiddleware()
+     , datareaders_()
+     , requesters_()
+     , repliers_()
+-    , callback_factory_(callback_factory_.getInstance())
++    , callback_factory_(middleware::CallbackFactory::getInstance())
+ {
+ }
+diff --git a/src/cpp/middleware/fastdds/FastDDSMiddleware.cpp b/src/cpp/middleware/fastdds/FastDDSMiddleware.cpp
+index a383fb9..98cd184 100644
+--- a/src/cpp/middleware/fastdds/FastDDSMiddleware.cpp
++++ b/src/cpp/middleware/fastdds/FastDDSMiddleware.cpp
+@@ -36,7 +36,7 @@ FastDDSMiddleware::FastDDSMiddleware()
+     , datareaders_()
+     , requesters_()
+     , repliers_()
+-    , callback_factory_(callback_factory_.getInstance())
++    , callback_factory_(middleware::CallbackFactory::getInstance())
+ {
+ }
+ 
+@@ -50,7 +50,7 @@ FastDDSMiddleware::FastDDSMiddleware(bool intraprocess_enabled)
+     , datareaders_()
+     , requesters_()
+     , repliers_()
+-    , callback_factory_(callback_factory_.getInstance())
++    , callback_factory_(middleware::CallbackFactory::getInstance())
+ {
+     agent_domain_id_ = get_domain_id_from_env();
+     if (agent_domain_id_)
+@@ -1287,4 +1287,4 @@ int16_t FastDDSMiddleware::get_domain_id_from_env(){
+ }
+ 
+ } // namespace uxr
+-} // namespace eprosima
+\ No newline at end of file
++} // namespace eprosima

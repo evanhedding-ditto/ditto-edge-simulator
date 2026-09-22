@@ -9,9 +9,23 @@ database:
       lan_enabled: false
       lan_mdns_enabled: false
       lan_multicast_enabled: false
+      # The SDK enables AWDL and Wi-Fi Aware BY DEFAULT. Without these two keys
+      # every Edge Server peers directly over awdl0 no matter what the rest of
+      # this block says -- observed at ~5 links per node with a 1-peer mesh
+      # configured, bypassing the relay and invisible to its metrics.
+      awdl_enabled: false
+      wifi_aware_enabled: false
     connect_config:
       known_tcp_servers: ${SIM_KNOWN_TCP_SERVERS}
-      known_ws_servers: ["${DITTO_WEBSOCKET_URL}"]
+      # Cloud link. EMPTY BY DEFAULT: this simulator exists to exercise the
+      # local mesh, and a Big Peer connection silently replaces it -- every node
+      # then receives every document in two hops regardless of the configured
+      # mesh, and presence reports no connection at all while it happens.
+      # NOTE `enable_cloud_sync: false` below does NOT suppress this. Edge
+      # Server clears only the SDK's DEFAULT websocket URLs and then merges
+      # known_ws_servers back in, so an explicit URL wins over the flag.
+      # Set SIM_ENABLE_CLOUD_SYNC=1 in a scenario to opt in.
+      known_ws_servers: ${SIM_KNOWN_WS_SERVERS}
       retry_interval_msec: 250
     listen_config:
       tcp_listen:

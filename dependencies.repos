@@ -1,0 +1,32 @@
+# External source dependencies, pinned by exact revision.
+#
+# Fetch with:   vcs import deps < dependencies.repos
+# (vcstool ships with ros-dev-tools: `pixi run -e ros vcs import deps < dependencies.repos`)
+#
+# Neither of these is packaged for osx-arm64 in robostack-jazzy or conda-forge,
+# so both are built from source. Checked 2026-09-22.
+#
+# NOT listed here, and deliberately so:
+#   PX4-Autopilot  - submodule-heavy, and vcstool's submodule support is weak.
+#                    Clone it explicitly:
+#                      git clone --recursive --branch v1.18.0-rc1 \
+#                        https://github.com/PX4/PX4-Autopilot.git deps/PX4-Autopilot
+#                      cd deps/PX4-Autopilot && make px4_sitl_sih
+#                    v1.18.0-rc1 is the exact revision this simulator is
+#                    validated against.
+#   Ditto-Edge-Server - private, and the branch carrying the gRPC API is not
+#                    pushed yet. Add it here once it is.
+#
+# px4_msgs is NOT an independent pin: it must match the PX4 version above.
+# 935c120 is upstream release/1.18, generated from PX4 fca3df8 = v1.18.0-rc1.
+# Moving one without the other produces stale generated headers, and
+# --symlink-install will show you an updated .msg while the headers are old.
+repositories:
+  px4_msgs:
+    type: git
+    url: https://github.com/PX4/px4_msgs.git
+    version: 935c120c51916b55dc62cce0b9a406178cde6e97
+  Micro-XRCE-DDS-Agent:
+    type: git
+    url: https://github.com/eProsima/Micro-XRCE-DDS-Agent.git
+    version: v2.4.3

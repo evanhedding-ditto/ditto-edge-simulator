@@ -2,20 +2,50 @@
 
 die() { echo "error: $*" >&2; exit 1; }
 
+# An external checkout, preferring deps/ -- populated from dependencies.repos --
+# and falling back to a sibling directory, which is how this tree was laid out
+# before 2026-09-22. Both work, so an existing checkout needs no rearranging.
+#
+# The marker is .git, not the directory: an interrupted clone leaves an empty
+# deps/<name> behind, and a bare -d test would prefer that over a working
+# sibling checkout and then fail somewhere less obvious. (.git is a file in a
+# submodule and a directory otherwise, hence -e.)
+sim_dep() {
+  if [[ -e "$SIM_ROOT/deps/$1/.git" ]]; then printf '%s/deps/%s\n' "$SIM_ROOT" "$1"
+  else printf '%s/../%s\n' "$SIM_ROOT" "$1"; fi
+}
+
 sim_init() {
   SIM_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
   : "${SIM_SCENARIO_FILE:=$SIM_ROOT/scenarios/mvp-two-px4.env}"
   [[ -r "$SIM_SCENARIO_FILE" ]] || die "scenario not readable: $SIM_SCENARIO_FILE"
   # shellcheck disable=SC1090
   source "$SIM_SCENARIO_FILE"
-  : "${SIM_PROTOTYPE_ROOT:=$SIM_ROOT/../ditto-autonomy-testing}"
-  : "${SIM_PX4_ROOT:=$SIM_ROOT/../PX4-Autopilot}"
-  : "${SIM_EDGE_ADAPTERS_ROOT:=$SIM_ROOT/../Ditto-Edge-Server/ditto-edge-adapters}"
-  : "${SIM_EDGE_SERVER_ROOT:=$SIM_ROOT/../Ditto-Edge-Server}"
+  : "${SIM_PX4_ROOT:=$(sim_dep PX4-Autopilot)}"
+  # The ROS underlay: px4_msgs, built by scripts/build/ros-underlay.sh. Only
+  # scenarios with ROS vehicles need it.
+  : "${SIM_ROS_UNDERLAY:=$SIM_ROOT/build/ros-underlay/install/setup.bash}"
+  # Micro XRCE-DDS Agent, likewise ROS-only. The BUILT agent, so it lives under
+  # build/; deps/ holds only fetched source.
+  : "${SIM_XRCE_ROOT:=$SIM_ROOT/build/micro-xrce-dds-agent}"
+  # gRPC, Protobuf and nlohmann_json come from the pixi environment, not from
+  # Homebrew. Naming the prefix explicitly matters: without it CMake finds
+  # /opt/homebrew on its own, and a build would silently link whatever version
+  # brew happens to hold rather than the one pinned in pixi.lock.
+  : "${SIM_PIXI_ENV:=$SIM_ROOT/.pixi/envs/default}"
+  : "${SIM_PIXI_ENV_ROS:=$SIM_ROOT/.pixi/envs/ros}"
+  : "${SIM_EDGE_SERVER_ROOT:=$(sim_dep Ditto-Edge-Server)}"
+  # Vendored inside the server checkout, so it follows wherever that resolved.
+  : "${SIM_EDGE_ADAPTERS_ROOT:=$SIM_EDGE_SERVER_ROOT/ditto-edge-adapters}"
   # Derived from the scenario just sourced, never carried over: down.sh calls
   # sim_init once per scenario in one shell, and an exported :=default would
   # pin the first scenario's directory while SIM_VEHICLE_COUNT changed under it.
   [[ -n "${SIM_SCENARIO_ID:-}" ]] || die "scenario defines no SIM_SCENARIO_ID: $SIM_SCENARIO_FILE"
+  # Space-separated indices only. A comma or a stray character would match no
+  # vehicle, every vehicle would count as a ROS vehicle, and the punishment is a
+  # silent ROS 2 install for a fleet that never launches ROS.
+  [[ "${SIM_MAVLINK_VEHICLES:-}" =~ ^[0-9\ ]*$ ]] ||
+    die "SIM_MAVLINK_VEHICLES must be space-separated indices: ${SIM_MAVLINK_VEHICLES}"
   SIM_RUNTIME_DIR="$SIM_ROOT/build/runtime/$SIM_SCENARIO_ID"
   : "${DITTO_EDGE_ENV_FILE:=$SIM_ROOT/.env}"
   # The network observer's API. One address shared by the observer process, the
@@ -23,8 +53,22 @@ sim_init() {
   # session runs at a time, so a fixed port is safe.
   : "${SIM_OBSERVER_ADDR:=127.0.0.1:50090}"
   export SIM_OBSERVER_ADDR
-  export SIM_ROOT SIM_SCENARIO_FILE SIM_PROTOTYPE_ROOT SIM_PX4_ROOT
+  # Geodetic origin. This was a .location.env dotfile in ditto-autonomy-testing
+  # that four scripts read silently; it is an ordinary default now, and a
+  # scenario may override it by setting either value before this runs.
+  : "${PX4_HOME_LAT:=36.01883233670948}"
+  : "${PX4_HOME_LON:=-78.9684198511774}"
+  export PX4_HOME_LAT PX4_HOME_LON
+  export SIM_ROOT SIM_SCENARIO_FILE SIM_PX4_ROOT SIM_ROS_UNDERLAY SIM_XRCE_ROOT
+  export SIM_PIXI_ENV SIM_PIXI_ENV_ROS
   export SIM_EDGE_ADAPTERS_ROOT SIM_EDGE_SERVER_ROOT SIM_RUNTIME_DIR
+}
+
+# Process Compose always runs in this repo's pixi environment and always against
+# the running scenario's controller port. Four call sites needed both.
+sim_compose() {
+  pixi run --manifest-path "$SIM_ROOT/pixi.toml" process-compose \
+    -p "$SIM_PROCESS_COMPOSE_PORT" "$@"
 }
 
 load_ditto_credentials() {
@@ -38,8 +82,60 @@ load_ditto_credentials() {
   : "${DITTO_ACCESS_TOKEN:?DITTO_ACCESS_TOKEN is required}"
 }
 
+# Every binary the simulator launches resolves the same way, in order:
+#
+#   1. the named environment variable   an explicit path, wins over everything
+#   2. bin/<name>                       drop a prebuilt build in and go
+#   3. the local build output           whatever the build script produces
+#
+# Step 2 is what lets a teammate run the simulator without building a component;
+# bin/ is gitignored. These return 1 rather than dying, so that sim.sh can ask
+# "do I need to build this?" with the same code that launch uses, and a caller
+# can say what to do about it -- which it knows and this does not.
+sim_find_binary() {
+  local name="$1" override="$2" candidate; shift 2
+  if [[ -n "${!override:-}" ]]; then
+    [[ -x "${!override}" ]] || die "$override is not executable: ${!override}"
+    printf '%s\n' "${!override}"
+    return 0
+  fi
+  for candidate in "$SIM_ROOT/bin/$name" "$@"; do
+    [[ -x "$candidate" ]] || continue
+    printf '%s\n' "$candidate"
+    return 0
+  done
+  return 1
+}
+
+edge_server_binary() {
+  sim_find_binary ditto-edge-server DITTO_EDGE_SERVER_BIN \
+    "$SIM_EDGE_SERVER_ROOT/ditto-edge-server/target/release/ditto-edge-server" \
+    "$SIM_EDGE_SERVER_ROOT/ditto-edge-server/target/debug/ditto-edge-server"
+}
+
+mavlink_adapter_binary() {
+  sim_find_binary px4-mavlink-ditto-bridge DITTO_MAVLINK_ADAPTER_BIN \
+    "$SIM_ROOT/build/mavlink-adapter/px4-mavlink-ditto-bridge"
+}
+
+ros_adapter_binary() {
+  sim_find_binary px4_ditto_bridge_node DITTO_ROS_ADAPTER_BIN \
+    "$SIM_ROOT/build/ros-gateway-host/install/px4_ditto_bridge/lib/px4_ditto_bridge/px4_ditto_bridge_node"
+}
+
 node_dir() { printf '%s/nodes/%s\n' "$SIM_RUNTIME_DIR" "$1"; }
 node_socket() { printf '%s/edge.sock\n' "$(node_dir "$1")"; }
+
+# Synthetic control link, by vehicle index. The synthetic vehicle binds the
+# autopilot port and streams to the adapter port; the adapter binds the adapter
+# port and learns where to reply from what arrives.
+#
+# PX4's own numbering cannot be reused: its pair is 14540+i and 14580+i, which
+# collide with each other at more than 40 vehicles. The 1000-port gap here
+# covers the tool's 255-vehicle ceiling, and both ranges sit clear of the relay
+# and of 19410-19429, which session/wait-telemetry.sh owns.
+synthetic_adapter_port() { printf '%s\n' "$(( ${SIM_SYNTHETIC_ADAPTER_PORT_BASE:-24540} + $1 ))"; }
+synthetic_autopilot_port() { printf '%s\n' "$(( ${SIM_SYNTHETIC_AUTOPILOT_PORT_BASE:-25540} + $1 ))"; }
 
 # Startup phase timestamps, one line per event, written outside nodes/ so they
 # survive teardown.  Twenty vehicles append concurrently; each line is far under
@@ -110,17 +206,24 @@ wait_for_fleet_xrce_listeners() {
   done
 }
 
-wait_for_fleet_mavlink_listeners() {
-  local vehicle
-  for vehicle in ${SIM_MAVLINK_VEHICLES:-}; do
-    wait_for_udp_listener "$((14540 + vehicle))"
-  done
-}
-
 is_mavlink_vehicle() {
   local vehicle
   for vehicle in ${SIM_MAVLINK_VEHICLES:-}; do
     [[ "$vehicle" == "$1" ]] && return 0
+  done
+  return 1
+}
+
+# Does this scenario run any ROS 2 vehicle? A synthetic fleet is MAVLink
+# throughout, and a scenario may list every vehicle in SIM_MAVLINK_VEHICLES.
+# Nothing in the ROS tier -- the underlay, the adapter, the XRCE agent, or the
+# ros pixi environment -- is built or installed when this is false, which is what
+# keeps a synthetic-only user from paying for ROS 2 they never run.
+scenario_uses_ros() {
+  local index
+  [[ "${SIM_SYNTHETIC_FLEET:-0}" == 1 ]] && return 1
+  for ((index = 0; index < SIM_VEHICLE_COUNT; ++index)); do
+    is_mavlink_vehicle "$index" || return 0
   done
   return 1
 }
@@ -366,7 +469,7 @@ wait_for_fleet_px4_startup() {
 wait_for_mesh_links() {
   local timeout="${1:?usage: wait_for_mesh_links <timeout>}"
   local metrics="$SIM_RUNTIME_DIR/network-metrics.json"
-  # Same defaults as render-fleet.sh and run-network.sh, which build the topology
+  # Same defaults as session/render-fleet.sh and process/network.sh, which build the topology
   # this counts. Without them `set -u` aborts on the scenarios that omit both.
   local peers="${SIM_MESH_PEERS_PER_VEHICLE:-1}" operator_peers="${SIM_OPERATOR_MESH_PEERS:-1}"
   local expected="$((SIM_VEHICLE_COUNT * peers + operator_peers))"

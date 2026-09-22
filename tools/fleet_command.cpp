@@ -5,12 +5,15 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <map>
 #include <random>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -27,8 +30,46 @@ constexpr char kFleetCommandsQuery[] =
 constexpr char kStateQuery[] = "SELECT * FROM vehicle_state";
 constexpr char kReceiptQuery[] = "SELECT * FROM fleet_command_receipts";
 constexpr auto kReadinessTimeout = std::chrono::seconds(180);
-constexpr auto kCommandTtl = std::chrono::seconds(240);
+constexpr auto kDefaultCommandTtl = std::chrono::seconds(240);
 constexpr std::int64_t kFreshStateMs = 5000;
+
+/// How long a written command stays executable.
+///
+/// The adapter enforces this, not the store: it compares `expires_unix_ms` on
+/// arrival and rejects a late command with `command_expired`
+/// (`adapters/core/src/bridge.cpp`). The document replicates either way, so an
+/// expired one looks exactly like replication having failed -- which is what
+/// made isolating a node for longer than the TTL and restoring it appear to be
+/// a sync bug rather than a deadline.
+///
+/// `batch` and the single-command path used to hardcode 30 s while `verify`
+/// used 240, so the same fleet disagreed with itself about when an order went
+/// stale. One value now, and `SIM_COMMAND_TTL_S` raises it for partition tests
+/// meant to outlast the default. 0 is refused rather than treated as "never":
+/// a command with no deadline is a different design decision, and the adapter's
+/// check would pass on a document written before the outage began.
+std::chrono::seconds command_ttl()
+{
+  static const std::chrono::seconds value = [] {
+    const char * text = std::getenv("SIM_COMMAND_TTL_S");
+    if (text == nullptr || *text == '\0') return kDefaultCommandTtl;
+    char * end = nullptr;
+    errno = 0;
+    const auto seconds = std::strtol(text, &end, 10);
+    if (end == text || *end != '\0' || errno == ERANGE || seconds <= 0) {
+      std::cerr << "warning: ignoring SIM_COMMAND_TTL_S=" << text
+                << ", using " << kDefaultCommandTtl.count() << "s\n";
+      return kDefaultCommandTtl;
+    }
+    return std::chrono::seconds(seconds);
+  }();
+  return value;
+}
+
+std::int64_t command_expiry_ms(const std::int64_t now)
+{
+  return now + std::chrono::duration_cast<std::chrono::milliseconds>(command_ttl()).count();
+}
 
 std::int64_t unix_time_ms()
 {
@@ -48,7 +89,10 @@ std::int64_t unix_time_ms()
             << " --socket PATH orbit VEHICLE NORTH EAST ALTITUDE RADIUS SPEED [CLOCKWISE] [ANGLE]\n"
             << "  " << program << " --socket PATH status VEHICLE\n"
             << "  " << program << " --socket PATH ready VEHICLE_COUNT\n"
-            << "  " << program << " --socket PATH verify VEHICLE_COUNT\n";
+            << "  " << program << " --socket PATH verify VEHICLE_COUNT\n"
+            << "  " << program << " --socket PATH batch [FILE]\n"
+            << "        one 'VEHICLE ACTION [ARGUMENT...]' per line, '-' or\n"
+            << "        omitted FILE reads stdin; applied as a single write\n";
   std::exit(2);
 }
 
@@ -228,7 +272,7 @@ void verify_fleet(
     ids.emplace(vehicle, id);
     document["commands"][vehicle] = {{"command_id", id}, {"schema", "ditto.fleet_command.v1"},
       {"target_vehicle_id", vehicle}, {"created_unix_ms", now},
-      {"expires_unix_ms", now + std::chrono::duration_cast<std::chrono::milliseconds>(kCommandTtl).count()},
+      {"expires_unix_ms", command_expiry_ms(now)},
       {"sequence", sequence}, {"kind", "goto_local"},
       {"north_m", position.north + (index % 2U == 0U ? 3.0F : -3.0F)},
       {"east_m", position.east}, {"altitude_m", std::max(2.0F, position.altitude + 1.0F)}};
@@ -299,14 +343,144 @@ void verify_fleet(
   throw std::runtime_error("fleet command or movement verification timed out: " + detail);
 }
 
+/// Fill one command's kind-specific fields from `ACTION ARGUMENT...` tokens.
+///
+/// Shared by the single-vehicle actions and `batch` so the two cannot drift in
+/// how a goto or an orbit is spelled.
+void fill_command(nlohmann::json & command, const std::vector<std::string> & tokens)
+{
+  const auto & action = tokens.at(0);
+  const auto count = tokens.size();
+  const auto at = [&tokens](const std::size_t index) {return tokens.at(index).c_str();};
+  if (action == "arm" || action == "disarm") {
+    if (count != 1) usage("ditto_fleet_command", "arm/disarm takes no arguments");
+    command["kind"] = "set_armed";
+    command["desired_armed"] = action == "arm";
+  } else if (action == "goto") {
+    if (count != 4 && count != 5) {
+      usage("ditto_fleet_command", "goto takes NORTH EAST ALTITUDE [YAW]");
+    }
+    command["kind"] = "goto_local";
+    command["north_m"] = number(at(1), "NORTH");
+    command["east_m"] = number(at(2), "EAST");
+    command["altitude_m"] = number(at(3), "ALTITUDE");
+    if (count == 5) command["yaw_rad"] = number(at(4), "YAW");
+  } else if (action == "orbit") {
+    if (count < 6 || count > 8) {
+      usage(
+        "ditto_fleet_command",
+        "orbit takes NORTH EAST ALTITUDE RADIUS SPEED [CLOCKWISE] [ANGLE]");
+    }
+    command["kind"] = "orbit_local";
+    command["center_north_m"] = number(at(1), "NORTH");
+    command["center_east_m"] = number(at(2), "EAST");
+    command["altitude_m"] = number(at(3), "ALTITUDE");
+    command["radius_m"] = number(at(4), "RADIUS");
+    command["speed_m_s"] = number(at(5), "SPEED");
+    if (count >= 7) command["clockwise"] = boolean(at(6));
+    if (count == 8) command["initial_angle_rad"] = number(at(7), "ANGLE");
+  } else {
+    usage("ditto_fleet_command", "unknown action");
+  }
+}
+
+/// Apply many vehicles' commands as a SINGLE `fleet-current` write.
+///
+/// The single-vehicle path is a read-modify-write of the one shared document,
+/// so N vehicles cost N reads, N writes and N document versions -- and it has
+/// to run serially, because UPDATE_LOCAL_DIFF lets two overlapping writers
+/// overwrite each other's slot with their own stale view of it. Batching
+/// removes both the round trips and that race, and every vehicle sees its
+/// order in the same document update instead of smeared across the burst.
+int run_batch(ditto::edge::Client & client, std::istream & input)
+{
+  std::vector<std::pair<std::string, std::vector<std::string>>> requests;
+  std::string line;
+  std::size_t line_number = 0;
+  while (std::getline(input, line)) {
+    ++line_number;
+    // Comments and blank lines keep a batch file readable.
+    const auto hash = line.find('#');
+    if (hash != std::string::npos) line.erase(hash);
+    std::istringstream fields(line);
+    std::vector<std::string> tokens;
+    for (std::string token; fields >> token;) tokens.push_back(std::move(token));
+    if (tokens.empty()) continue;
+    if (tokens.size() < 2) {
+      throw std::runtime_error(
+              "line " + std::to_string(line_number) +
+              ": expected VEHICLE ACTION [ARGUMENT...]");
+    }
+    auto vehicle = tokens.front();
+    tokens.erase(tokens.begin());
+    requests.emplace_back(std::move(vehicle), std::move(tokens));
+  }
+  if (requests.empty()) usage("ditto_fleet_command", "batch input contained no commands");
+
+  // One timestamp for the whole batch: the point of batching is that the fleet
+  // is given one order, so the commands must not carry staggered TTLs.
+  const auto now = unix_time_ms();
+  auto document = fleet_commands(client);
+  std::map<std::string, std::string> ids;
+  for (const auto &[vehicle, tokens] : requests) {
+    if (ids.count(vehicle) != 0) {
+      throw std::runtime_error("vehicle appears more than once in one batch: " + vehicle);
+    }
+    const auto current = document["commands"].find(vehicle);
+    const auto sequence = current == document["commands"].end() ? 1ULL :
+      current->value("sequence", 0ULL) + 1ULL;
+    nlohmann::json command{
+      {"command_id", command_id(vehicle, now)},
+      {"schema", "ditto.fleet_command.v1"},
+      {"target_vehicle_id", vehicle},
+      {"created_unix_ms", now},
+      {"expires_unix_ms", command_expiry_ms(now)},
+      {"sequence", sequence},
+    };
+    fill_command(command, tokens);
+    ids.emplace(vehicle, command.at("command_id").get<std::string>());
+    document["commands"][vehicle] = std::move(command);
+  }
+  document["updated_unix_ms"] = now;
+  ditto::edge::StoreResult result;
+  execute(client, kInsert, nlohmann::json{{"doc", document}}, result);
+  for (const auto &[vehicle, id] : ids) {
+    std::cout << vehicle << ' ' << id << '\n';
+  }
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char ** argv)
 {
-  if (argc < 5 || std::string_view(argv[1]) != "--socket") {
+  if (argc < 4 || std::string_view(argv[1]) != "--socket") {
     usage(argv[0]);
   }
   const std::string action(argv[3]);
+  // `batch` is the one action that names no vehicle, so it is dispatched before
+  // the checks that require argv[4].
+  if (action == "batch") {
+    if (argc > 5) usage(argv[0]);
+    try {
+      ditto::edge::Client client(argv[2], std::string{}, std::chrono::seconds(30));
+      if (argc == 5 && std::string_view(argv[4]) != "-") {
+        std::ifstream file(argv[4]);
+        if (!file) {
+          std::cerr << "error: cannot read batch file: " << argv[4] << '\n';
+          return 1;
+        }
+        return run_batch(client, file);
+      }
+      return run_batch(client, std::cin);
+    } catch (const std::exception & exception) {
+      std::cerr << "error: " << exception.what() << '\n';
+      return 1;
+    }
+  }
+  if (argc < 5) {
+    usage(argv[0]);
+  }
   const std::string vehicle(argv[4]);
   if (vehicle.empty()) {
     usage(argv[0], "VEHICLE is required");
@@ -354,44 +528,13 @@ int main(int argc, char ** argv)
       {"schema", "ditto.fleet_command.v1"},
       {"target_vehicle_id", vehicle},
       {"created_unix_ms", now},
-      {"expires_unix_ms", now + 30000},
+      {"expires_unix_ms", command_expiry_ms(now)},
     };
-    if (action == "arm" || action == "disarm") {
-      if (argc != 5) {
-        usage(argv[0]);
-      }
-      command["kind"] = "set_armed";
-      command["desired_armed"] = action == "arm";
-    } else if (action == "goto") {
-      if (argc != 8 && argc != 9) {
-        usage(argv[0]);
-      }
-      command["kind"] = "goto_local";
-      command["north_m"] = number(argv[5], "NORTH");
-      command["east_m"] = number(argv[6], "EAST");
-      command["altitude_m"] = number(argv[7], "ALTITUDE");
-      if (argc == 9) {
-        command["yaw_rad"] = number(argv[8], "YAW");
-      }
-    } else if (action == "orbit") {
-      if (argc < 10 || argc > 12) {
-        usage(argv[0]);
-      }
-      command["kind"] = "orbit_local";
-      command["center_north_m"] = number(argv[5], "NORTH");
-      command["center_east_m"] = number(argv[6], "EAST");
-      command["altitude_m"] = number(argv[7], "ALTITUDE");
-      command["radius_m"] = number(argv[8], "RADIUS");
-      command["speed_m_s"] = number(argv[9], "SPEED");
-      if (argc >= 11) {
-        command["clockwise"] = boolean(argv[10]);
-      }
-      if (argc == 12) {
-        command["initial_angle_rad"] = number(argv[11], "ANGLE");
-      }
-    } else {
-      usage(argv[0], "unknown action");
+    std::vector<std::string> tokens{action};
+    for (int index = 5; index < argc; ++index) {
+      tokens.emplace_back(argv[index]);
     }
+    fill_command(command, tokens);
 
     auto document = fleet_commands(client);
     const auto current = document["commands"].find(vehicle);

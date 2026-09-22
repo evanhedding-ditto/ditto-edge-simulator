@@ -4,11 +4,45 @@ name = "ditto-edge-simulator"
 platforms = ["osx-arm64"]
 version = "0.1.0"
 
+# Dependencies were inherited from ditto-autonomy-testing until 2026-09-22, when
+# that repository was deleted. The split below is deliberate: only ROS scenarios
+# pay for ROS. A synthetic or MAVLink-only fleet needs process-compose and
+# nothing else, so `pixi install` does not drag in ROS 2 Jazzy for everyone.
+[dependencies]
+process-compose = ">=1.122.0,<2"
+# gRPC, Protobuf and nlohmann_json came from Homebrew until 2026-09-22. Pinning
+# them here means every build links the same versions, on every machine, and the
+# setup instructions no longer depend on what `brew` happens to have installed.
+# libgrpc 1.83.1 is the version the adapters were already linked against.
+libgrpc = ">=1.83.1,<1.84"
+libprotobuf = "*"
+nlohmann_json = ">=3.12,<4"
+# The build tools too, so nothing at all is taken from Homebrew.
+cmake = ">=3.31,<5"
+ninja = "*"
+
+# ROS 2, colcon, and the Fast DDS runtime the XRCE agent links against. Required
+# only by scenarios that declare ROS vehicles: mvp-two-px4, mvp-four-mixed,
+# mvp-twenty-mixed. Built and run via `pixi run -e ros`.
+[feature.ros.dependencies]
+ros-jazzy-desktop = ">=0.11.0,<0.12"
+ros-dev-tools = ">=1.0.2,<2"
+
+[environments]
+ros = ["ros"]
+
 [tasks]
 # `sim` takes a scenario name: `pixi run sim synthetic-twenty`. The tasks below
 # are shortcuts for the ones in regular use.
 sim = "./scripts/sim.sh"
 sim-twenty = "./scripts/sim.sh synthetic-twenty"
 sim-hundred = "./scripts/sim.sh synthetic-hundred"
+sim-factory = "./scripts/sim.sh factory-twenty"
 sim-down = "./scripts/down.sh"
 sim-status = "./scripts/status.sh"
+
+# Deliberately NOT named sim-*: this is the factory world and its robots with
+# no network at all -- no Edge Server, no relay, no adapters, no observer, and
+# so nothing for sim-down or sim-status to report on. Closing the viewer stops
+# it. SIM_ENABLE_CLOUD_SYNC has no effect here; there is no node to configure.
+demo-factory = "./scripts/demo/factory.sh"

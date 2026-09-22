@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Report where each vehicle's startup time went, from the phase stamps written
-# by run-px4.sh and the fleet startup gate.  Run after a launch; the file
-# survives teardown and is reset by up.sh.
+# by process/px4.sh and the fleet startup gate.  Run after a launch; the file
+# survives teardown and is reset by session/up.sh.
 #
 # usage: px4-phases.sh [scenario-id | path/to/px4-phases.tsv]
 set -euo pipefail

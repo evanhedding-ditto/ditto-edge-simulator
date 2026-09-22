@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <limits>
 #include <array>
 #include <atomic>
 #include <cerrno>
@@ -33,6 +34,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "world.hpp"
+
 namespace
 {
 
@@ -53,6 +56,15 @@ struct Vehicle {
   std::array<float, 4> attitude_quaternion{1.0F, 0.0F, 0.0F, 0.0F};
   bool armed{};
   bool failsafe{};
+  /// Drawn as a ground robot rather than a drone. Taken from the vehicle's own
+  /// HEARTBEAT rather than a viewer-side setting: a fleet that is part rover and
+  /// part multirotor is a thing the simulator can already run, and the vehicle
+  /// is the only party that knows which it is.
+  bool ground{};
+  /// Horizontal ground speed, used to drive a walking gait. Taken from the
+  /// velocity the telemetry already carries rather than differenced from
+  /// position, which at a 10 Hz publish rate would be mostly quantisation.
+  float speed_mps{};
   std::int64_t published_unix_ms{};
 };
 
@@ -91,6 +103,9 @@ struct Source {
   Vehicle vehicle;
   mavlink_message_t parser_buffer{};
   mavlink_status_t parser_status{};
+  /// Set once this vehicle has sent LOCAL_POSITION_NED, after which its
+  /// GLOBAL_POSITION_INT is ignored for position. See decode_mavlink.
+  bool local_frame{};
   int fd{-1};
 };
 
@@ -144,10 +159,30 @@ std::unordered_map<std::string, NetworkStatus> read_network_metrics(const std::s
   return result;
 }
 
+/// How stale the relay's link metrics may be before a node reads as NO LINK.
+///
+/// Sized from measurement, not intent. The relay means to publish every second,
+/// but on a live twenty-node fleet the published interval ran from 631 ms to
+/// 1588 ms (median 1068), and this viewer re-reads on its own 250 ms cycle, so
+/// the worst age on screen reached ~1838 ms. Against the old 1500 ms threshold
+/// that tripped on roughly one gap in seven -- and because every node inherits
+/// the file's single `observed_unix_ms`, the whole fleet blinked to NO LINK at
+/// once, which read as a fleet-wide network event rather than a stale file.
+///
+/// Four seconds is a missed publish absorbed with margin, while a relay that
+/// has actually stopped still shows within a few seconds.
+constexpr std::int64_t kMetricsStaleMs = 4000;
+
+/// A publish that lands between this frame's clock read and its file read is
+/// newer than `now`, not invalid, and rejecting it blanked the fleet for a
+/// frame. Only a wildly future stamp means a clock worth distrusting.
+constexpr std::int64_t kMetricsSkewMs = 1000;
+
 bool fresh(const NetworkStatus & status, const std::int64_t now)
 {
-  return status.observed_unix_ms > 0 && now >= status.observed_unix_ms &&
-    now - status.observed_unix_ms <= 1500;
+  if (status.observed_unix_ms <= 0) return false;
+  const std::int64_t age = now - status.observed_unix_ms;
+  return age <= kMetricsStaleMs && age >= -kMetricsSkewMs;
 }
 
 Color vehicle_color(const std::string & id)
@@ -242,6 +277,109 @@ void draw_drone(const Vehicle & vehicle, const Vector3 center)
   DrawSphere(center, 0.19F, vehicle.failsafe ? RED : (vehicle.armed ? LIME : LIGHTGRAY));
 }
 
+/// A bipedal factory robot, in the manner of an Agility Digit: digitigrade legs
+/// that bend backwards at the middle joint, a boxy torso, slim arms and a
+/// sensor head. `center` sits on the floor the robot is standing on, so
+/// everything here is built upward from it.
+///
+/// `gait` is a walk phase in radians, advanced by the caller from the robot's
+/// own ground speed. A biped whose legs hold still while its body slides across
+/// the floor looks far worse than a wheeled puck ever did -- the legs are the
+/// reason to accept the extra geometry, so they have to move.
+void draw_robot(const Vehicle & vehicle, const Vector3 center, const float gait)
+{
+  const Color color = vehicle_color(vehicle.id);
+  const Vector3 forward = Vector3Normalize(rotate_by_px4_quaternion(vehicle, {1.0F, 0.0F, 0.0F}));
+  const Vector3 right = Vector3Normalize(rotate_by_px4_quaternion(vehicle, {0.0F, 1.0F, 0.0F}));
+  const Vector3 up = Vector3Negate(
+    Vector3Normalize(rotate_by_px4_quaternion(vehicle, {0.0F, 0.0F, 1.0F})));
+
+  // Stride scales with speed so a standing robot stands still rather than
+  // marching on the spot.
+  const float stride = std::clamp(vehicle.speed_mps / 1.4F, 0.0F, 1.0F);
+
+  /// A point in the robot's own frame: height, forward offset, lateral offset.
+  const auto at = [&](const float u, const float f, const float r) {
+      return Vector3Add(center, Vector3Add(Vector3Scale(up, u),
+        Vector3Add(Vector3Scale(forward, f), Vector3Scale(right, r))));
+    };
+  const auto limb = [](const Vector3 from, const Vector3 to, const float radius,
+      const Color limb_color) {
+      DrawCylinderEx(from, to, radius, radius, 8, limb_color);
+    };
+
+  // A slight vertical bob at twice the step rate, as weight transfers.
+  const float bob = 0.012F * std::cos(gait * 2.0F) * stride;
+  const float hip_height = 0.86F + bob;
+
+  for (const float side : {-1.0F, 1.0F}) {
+    const float swing = std::sin(gait + (side > 0.0F ? 0.0F : PI)) * stride;
+    // Lift the foot only on the half of the cycle that carries it forward.
+    const float lift = std::max(0.0F, std::sin(gait + (side > 0.0F ? 0.0F : PI))) * 0.06F * stride;
+    const float lateral = side * 0.12F;
+
+    const Vector3 hip = at(hip_height, 0.0F, lateral);
+    // The middle joint sits BEHIND the line from hip to ankle. That backward
+    // bend is what makes the leg read as a bird's rather than a person's, and
+    // it is the single most recognisable thing about this class of robot.
+    const Vector3 knee = at(0.44F + bob, -0.15F + swing * 0.09F, lateral);
+    const Vector3 ankle = at(0.10F + lift, swing * 0.19F, lateral);
+    const Vector3 toe = Vector3Add(ankle, Vector3Scale(forward, 0.11F));
+
+    limb(hip, knee, 0.048F, DARKGRAY);
+    limb(knee, ankle, 0.038F, GRAY);
+    limb(Vector3Add(ankle, Vector3Scale(forward, -0.05F)), toe, 0.032F, DARKGRAY);
+    DrawSphere(knee, 0.052F, DARKGRAY);
+  }
+
+  // Pelvis, then the torso above it.
+  limb(at(hip_height, 0.0F, -0.12F), at(hip_height, 0.0F, 0.12F), 0.10F, DARKGRAY);
+  DrawCylinderEx(at(hip_height + 0.04F, 0.0F, 0.0F), at(1.34F + bob, 0.0F, 0.0F), 0.15F, 0.17F,
+    12, color);
+
+  // Arms swing opposite the leg on the same side while walking, and work at
+  // something once the robot stops. A robot standing perfectly rigid at a
+  // destination reads as frozen -- as a stalled simulation rather than as a
+  // machine doing its job -- and standing still is most of what these robots do
+  // once they have been commanded somewhere.
+  const float working = 1.0F - std::min(1.0F, stride * 4.0F);
+  // Offset the work cycle per robot, or a room full of them moves in lockstep.
+  std::size_t hash = 0;
+  for (const auto character : vehicle.id) hash = hash * 31U + static_cast<unsigned char>(character);
+  const float cycle = static_cast<float>(GetTime()) * 2.6F +
+    static_cast<float>(hash % 100U) * 0.063F;
+  for (const float side : {-1.0F, 1.0F}) {
+    const float swing = -std::sin(gait + (side > 0.0F ? 0.0F : PI)) * stride;
+    const float lateral = side * 0.19F;
+    const Vector3 shoulder = at(1.30F + bob, 0.0F, lateral);
+    Vector3 elbow = at(1.05F + bob, swing * 0.10F, lateral * 1.05F);
+    Vector3 hand = at(0.83F + bob, swing * 0.17F, lateral * 1.02F);
+    if (working > 0.0F) {
+      // Elbows in, hands out in front, rising and falling out of phase with
+      // each other: working at something waist-high.
+      const float lift = std::sin(cycle + (side > 0.0F ? 0.0F : 1.7F)) * 0.5F + 0.5F;
+      const Vector3 busy_elbow = at(1.06F + bob, 0.14F, lateral * 0.92F);
+      const Vector3 busy_hand = at(0.94F + lift * 0.11F + bob, 0.34F, lateral * 0.52F);
+      elbow = Vector3Lerp(elbow, busy_elbow, working);
+      hand = Vector3Lerp(hand, busy_hand, working);
+    }
+    limb(shoulder, elbow, 0.035F, GRAY);
+    limb(elbow, hand, 0.030F, DARKGRAY);
+    DrawSphere(shoulder, 0.048F, DARKGRAY);
+  }
+
+  // Head, with a visor on the front so the facing is readable at a distance.
+  DrawCylinderEx(at(1.36F + bob, 0.0F, 0.0F), at(1.53F + bob, 0.0F, 0.0F), 0.08F, 0.08F, 10,
+    DARKGRAY);
+  const Vector3 visor = at(1.47F + bob, 0.06F, 0.0F);
+  DrawCylinderEx(visor, Vector3Add(visor, Vector3Scale(forward, 0.04F)), 0.06F, 0.05F, 10,
+    Fade(YELLOW, 0.9F));
+
+  // Status, on the chest where it stays visible from every angle.
+  DrawSphere(at(1.22F + bob, 0.15F, 0.0F), 0.055F,
+    vehicle.failsafe ? RED : (vehicle.armed ? LIME : LIGHTGRAY));
+}
+
 std::int64_t unix_time_ms()
 {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -278,7 +416,26 @@ void decode_mavlink(
       continue;
     }
     auto & vehicle = source.vehicle;
-    if (message.msgid == MAVLINK_MSG_ID_GLOBAL_POSITION_INT) {
+    // LOCAL_POSITION_NED when the vehicle offers it, and it wins outright.
+    //
+    // The global path below rebuilds NED by flat-earth from the FIRST fix it
+    // receives, and that datum is whichever vehicle's packet happened to arrive
+    // first -- including its altitude. Out in the open that only shifts the
+    // whole fleet together and nobody notices. Inside a building it is fatal: a
+    // robot on the top floor reporting first would put its own floor at zero and
+    // every other level above or below the ground the building is drawn on. The
+    // local frame is already what the world file is authored in, so taking it
+    // directly removes the reconstruction and the trap with it.
+    if (message.msgid == MAVLINK_MSG_ID_LOCAL_POSITION_NED) {
+      mavlink_local_position_ned_t state{};
+      mavlink_msg_local_position_ned_decode(&message, &state);
+      source.local_frame = true;
+      vehicle.north_m = state.x;
+      vehicle.east_m = state.y;
+      vehicle.down_m = state.z;
+      vehicle.speed_mps = std::hypot(state.vx, state.vy);
+      vehicle.published_unix_ms = unix_time_ms();
+    } else if (message.msgid == MAVLINK_MSG_ID_GLOBAL_POSITION_INT && !source.local_frame) {
       mavlink_global_position_int_t state{};
       mavlink_msg_global_position_int_decode(&message, &state);
       const double latitude = state.lat / 1e7;
@@ -298,11 +455,14 @@ void decode_mavlink(
       vehicle.east_m = static_cast<float>((longitude - origin.longitude) * metres_per_degree *
         std::cos(origin.latitude * 0.017453292519943295));
       vehicle.down_m = static_cast<float>(origin.altitude - altitude);
+      // Velocity here is centimetres per second.
+      vehicle.speed_mps = std::hypot(state.vx, state.vy) * 0.01F;
       vehicle.published_unix_ms = unix_time_ms();
     } else if (message.msgid == MAVLINK_MSG_ID_HEARTBEAT) {
       mavlink_heartbeat_t state{};
       mavlink_msg_heartbeat_decode(&message, &state);
       vehicle.armed = (state.base_mode & MAV_MODE_FLAG_SAFETY_ARMED) != 0;
+      vehicle.ground = state.type == MAV_TYPE_GROUND_ROVER;
     } else if (message.msgid == MAVLINK_MSG_ID_ATTITUDE) {
       mavlink_attitude_t state{};
       mavlink_msg_attitude_decode(&message, &state);
@@ -393,6 +553,57 @@ const char * transport_label(const std::string & kind) {
 /// offering the control would only earn a FailedPrecondition from Edge Server.
 /// The observer reports the configured endpoints even while a transport is off,
 /// which is what makes the distinction visible here.
+/// Whether `node` still holds a transport that could carry `type`.
+///
+/// Two sources disagree for a while after a cut, and this reconciles them.
+/// Transport state is read from each node directly and changes the instant it
+/// is set; the presence graph that produces links is eventually consistent and
+/// coalesced, and on a settled fleet nothing prompts it to reconverge. So a
+/// link whose transport is already gone kept its line on screen until the fleet
+/// next had something to say -- which made a cut look like it had not taken.
+/// Drawing the intersection makes a cut leave the screen when it is cut.
+///
+/// This is one-directional on purpose. A transport being off proves the link
+/// cannot exist, so the line goes immediately. A transport being back on proves
+/// nothing about whether the link has re-formed, so restoring waits for
+/// presence to actually report it -- which is the honest answer, since there is
+/// no link to draw until there is.
+bool can_carry(const ditto::observer::Node & node, const ditto::observer::PathType type)
+{
+  // For a node no observer could read, transports are unknown rather than
+  // absent, so nothing is suppressed on its behalf.
+  if (!node.reachable) return true;
+  const auto enabled = [&node](const std::initializer_list<const char *> kinds) {
+    return std::any_of(
+      node.transports.begin(), node.transports.end(),
+      [&kinds](const ditto::observer::TransportStatus & transport) {
+        if (!transport.enabled) return false;
+        return std::any_of(kinds.begin(), kinds.end(), [&transport](const char * kind) {
+          return transport.kind == kind;
+        });
+      });
+  };
+  switch (type) {
+    // A LAN link and a relay-proxied TCP one both present as `access_point`
+    // and cannot be told apart in presence, so either transport keeps the path
+    // alive. Cutting TCP with LAN still up correctly leaves the line drawn.
+    case ditto::observer::PathType::access_point:
+      return enabled({"lan", "tcp_connect", "tcp_listen"});
+    case ditto::observer::PathType::p2p_wifi:
+      return enabled({"awdl", "wifi_aware"});
+    case ditto::observer::PathType::bluetooth:
+      return enabled({"bluetooth"});
+    case ditto::observer::PathType::web_socket:
+      return enabled({"websocket_connect", "http_listen"});
+    case ditto::observer::PathType::cloud:
+      return enabled({"websocket_connect"});
+    // No known carrier to check against.
+    case ditto::observer::PathType::unspecified:
+      break;
+  }
+  return true;
+}
+
 bool transport_actionable(
   const ditto::observer::TransportStatus & transport, const ditto::observer::Node & node) {
   if (transport.kind == "tcp_connect" || transport.kind == "websocket_connect") {
@@ -427,8 +638,14 @@ int main(int argc, char ** argv)
   std::vector<Source> sources;
   std::string network_metrics;
   std::string observer_endpoint;
+  std::string world_path;
   try {
     for (int index = 1; index < argc; ++index) {
+      if (std::string(argv[index]) == "--world") {
+        if (++index == argc) throw std::invalid_argument("world file path is required");
+        world_path = argv[index];
+        continue;
+      }
       if (std::string(argv[index]) == "--observer") {
         if (++index == argc) throw std::invalid_argument("observer endpoint is required");
         observer_endpoint = argv[index];
@@ -441,14 +658,16 @@ int main(int argc, char ** argv)
       }
       if (std::string(argv[index]) != "--vehicle" || ++index == argc) {
         TraceLog(LOG_ERROR,
-          "usage: %s [--network-metrics PATH] [--observer ADDR] --vehicle ID --port PX4_SIH_PORT [...]",
+          "usage: %s [--network-metrics PATH] [--observer ADDR] [--world PATH]"
+          " --vehicle ID --port PX4_SIH_PORT [...]",
           argv[0]);
         return 2;
       }
       std::string vehicle_id(argv[index]);
       if (++index == argc || std::string(argv[index]) != "--port" || ++index == argc) {
         TraceLog(LOG_ERROR,
-          "usage: %s [--network-metrics PATH] [--observer ADDR] --vehicle ID --port PX4_SIH_PORT [...]",
+          "usage: %s [--network-metrics PATH] [--observer ADDR] [--world PATH]"
+          " --vehicle ID --port PX4_SIH_PORT [...]",
           argv[0]);
         return 2;
       }
@@ -550,18 +769,34 @@ int main(int argc, char ** argv)
     });
   }
 
+  // Where a toggle drops the snapshot it pulls once the change has applied.
+  //
+  // Held by `shared_ptr` because the toggle thread is detached: it may outlive
+  // the click, and main, so it must not hold a reference to anything on main's
+  // stack. The render thread is the only writer of `network`.
+  struct PendingNetwork
+  {
+    std::mutex mutex;
+    bool has{false};
+    ditto::observer::Snapshot snapshot;
+  };
+  const auto pending_network = std::make_shared<PendingNetwork>();
+
   // Applying a change to twenty-one nodes took about a third of a second, so
   // it runs off the render thread. Everything is copied in: the thread may
   // outlive the click that started it.
-  const auto send_toggle = [&observer_endpoint](
-    std::vector<std::string> node_ids, std::string kind, const bool enabled) {
+  // Several kinds in one call, because some changes are only meaningful as a
+  // set: cutting `tcp_connect` alone does not isolate a node, since peers keep
+  // dialing in, so TCP has to go down in both directions at once.
+  const auto send_toggle = [&observer_endpoint, pending_network](
+    std::vector<std::string> node_ids, std::vector<std::pair<std::string, bool>> toggles) {
       if (observer_endpoint.empty()) return;
       std::thread(
-        [endpoint = observer_endpoint, node_ids = std::move(node_ids), kind = std::move(kind),
-          enabled]() {
+        [endpoint = observer_endpoint, node_ids = std::move(node_ids),
+          toggles = std::move(toggles), pending = pending_network]() {
           ditto::observer::Client client(endpoint, std::chrono::seconds(30));
           std::vector<ditto::observer::TransportResult> results;
-          const auto status = client.set_transports(node_ids, {{kind, enabled}}, results);
+          const auto status = client.set_transports(node_ids, toggles, results);
           if (!status.ok()) {
             TraceLog(LOG_WARNING, "transport change refused: %s", status.error_message().c_str());
             return;
@@ -570,6 +805,17 @@ int main(int argc, char ** argv)
             if (!result.applied) {
               TraceLog(LOG_WARNING, "%s: %s", result.node_id.c_str(), result.error.c_str());
             }
+          }
+          // Pull the network instead of waiting to be told about it. Cutting a
+          // transport does not reliably move presence: on a settled fleet the
+          // observer has nothing to report, so a link that is already gone kept
+          // its line on screen until unrelated traffic woke the stream, which
+          // made a cut look like it had not taken.
+          ditto::observer::Snapshot refreshed;
+          if (client.network(refreshed).ok()) {
+            std::lock_guard<std::mutex> lock(pending->mutex);
+            pending->snapshot = std::move(refreshed);
+            pending->has = true;
           }
         })
         .detach();
@@ -597,20 +843,59 @@ int main(int argc, char ** argv)
       DrawTextEx(ui_font, text, {x, y}, size, 0.5F, color);
     };
 
-  const float map_size = sources.size() > 4 ? 240.0F : 100.0F;
-  const float initial_distance = sources.size() > 4 ? 140.0F : 48.0F;
-  float yaw = 0.78F;
-  float pitch = 0.55F;
+  // Static scenery, if the scenario names a world file. Display only; see
+  // world.hpp. An absent or unreadable world leaves the ground bare.
+  const sim::world::World world = sim::world::read(world_path);
+  if (!world_path.empty()) {
+    if (world.empty()) {
+      TraceLog(LOG_WARNING, "no world objects drawn from %s", world_path.c_str());
+    } else {
+      TraceLog(LOG_INFO, "world '%s': %zu objects from %s",
+        world.name.c_str(), world.objects.size(), world_path.c_str());
+    }
+  }
+
+  // A world declaring its own extent overrides the fleet-size guess, so scenery
+  // near the edge of the map is not left standing off the ground plane.
+  const float map_size = world.extent_m > 0.0F
+    ? world.extent_m
+    : (sources.size() > 4 ? 240.0F : 100.0F);
+  // Frame the world when there is one. The fleet-size guess is tuned for the
+  // open-air demos, where twenty vehicles spread over a couple of hundred
+  // metres; pointed at a fifty-metre building it opens on a speck in the middle
+  // of an empty plane.
+  // Frame the camera on what is drawn, not on the ground plane. The extent is
+  // deliberately wider than the scenery -- 240 m of plane under 127 m of
+  // buildings in the twenty-node world -- so opening at the extent puts the
+  // fleet in the distance. A world with no objects falls back to the fleet-size
+  // guess, which is all there is to go on.
+  const sim::world::Bounds bounds = sim::world::content_bounds(world);
+  const float initial_distance = bounds.valid
+    ? bounds.framing_span_m() * 1.15F
+    : (sources.size() > 4 ? 140.0F : 48.0F);
+  // The world framing above assumes these two; they live in world.hpp so the
+  // assumption and the value cannot drift apart.
+  float yaw = sim::world::kDefaultYawRad;
+  float pitch = sim::world::kDefaultPitchRad;
   float distance = initial_distance;
   Camera3D camera{};
-  camera.target = {0.0F, 3.0F, 0.0F};
+  const Vector3 home_target = bounds.valid ? bounds.target() : Vector3{0.0F, 3.0F, 0.0F};
+  camera.target = home_target;
   camera.up = {0.0F, 1.0F, 0.0F};
   camera.fovy = 48.0F;
   camera.projection = CAMERA_PERSPECTIVE;
   std::unordered_map<std::string, Presentation> presentations;
+  /// Walk phase per ground robot, advanced from its own speed so that stride
+  /// rate follows the robot rather than the frame rate.
+  std::unordered_map<std::string, float> gait_phase;
   std::unordered_map<std::string, NetworkStatus> link_status;
   auto next_metrics_read = Clock::now();
   std::string selected_vehicle;
+  // A left-press in the world both pans the camera and, if it turns out not to
+  // have moved, selects whatever is under it. Only a release close to where the
+  // press landed counts as a click.
+  Vector2 press_at{};
+  bool press_in_world = false;
   // A frame-local copy of the observer's view, refreshed only when it changes.
   NetworkView net;
   bool net_ever_seen = false;
@@ -623,14 +908,41 @@ int main(int argc, char ** argv)
   int settle_frames = 0;
 
   while (!shutdown_requested && !WindowShouldClose()) {
+    // Built once per frame, after `net` settles: the link lines and the legend
+    // both filter on the same rule, so the panel cannot claim links that are
+    // no longer drawn.
+    std::unordered_map<std::string, const ditto::observer::Node *> peer_to_node_info;
+    std::map<std::string, std::uint32_t> live_links_by_type;
+
+    bool network_dirty = false;
+    {
+      std::lock_guard<std::mutex> lock(pending_network->mutex);
+      if (pending_network->has) {
+        std::lock_guard<std::mutex> network_lock(network_mutex);
+        network.snapshot = std::move(pending_network->snapshot);
+        pending_network->has = false;
+        network_dirty = true;
+      }
+    }
     {
       std::lock_guard<std::mutex> lock(network_mutex);
-      if (network.snapshot.observed_unix_ms != net.snapshot.observed_unix_ms ||
+      if (network_dirty ||
+        network.snapshot.observed_unix_ms != net.snapshot.observed_unix_ms ||
         network.connected != net.connected || network.error != net.error)
       {
         net = network;
         net_ever_seen = net_ever_seen || net.snapshot.observed_unix_ms != 0;
       }
+    }
+    for (const auto & node : net.snapshot.nodes) {
+      if (!node.peer_key.empty()) peer_to_node_info[node.peer_key] = &node;
+    }
+    for (const auto & link : net.snapshot.links) {
+      const auto first = peer_to_node_info.find(link.peer_key_1);
+      const auto second = peer_to_node_info.find(link.peer_key_2);
+      if (first != peer_to_node_info.end() && !can_carry(*first->second, link.type)) continue;
+      if (second != peer_to_node_info.end() && !can_carry(*second->second, link.type)) continue;
+      ++live_links_by_type[ditto::observer::path_type_name(link.type)];
     }
 
     // The node inspector accepts clicks, so its rectangle has to be known
@@ -662,6 +974,12 @@ int main(int argc, char ** argv)
       pitch = std::clamp(pitch + delta.y * 0.006F, 0.12F, 1.35F);
     }
     if (!pointer_on_inspector && GetMousePosition().x < sidebar_left &&
+      IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+    {
+      press_at = GetMousePosition();
+      press_in_world = true;
+    }
+    if (!pointer_on_inspector && GetMousePosition().x < sidebar_left &&
       IsMouseButtonDown(MOUSE_BUTTON_LEFT))
     {
       const auto delta = GetMouseDelta();
@@ -679,10 +997,10 @@ int main(int argc, char ** argv)
     }
     distance = std::clamp(distance - GetMouseWheelMove() * 3.0F, 10.0F, map_size * 2.0F);
     if (IsKeyPressed(KEY_F)) {
-      yaw = 0.78F;
-      pitch = 0.55F;
+      yaw = sim::world::kDefaultYawRad;
+      pitch = sim::world::kDefaultPitchRad;
       distance = initial_distance;
-      camera.target = {0.0F, 3.0F, 0.0F};
+      camera.target = home_target;
     }
     camera.position = {
       camera.target.x + std::sin(yaw) * std::cos(pitch) * distance,
@@ -695,12 +1013,14 @@ int main(int argc, char ** argv)
       std::lock_guard<std::mutex> lock(snapshot_mutex);
       snapshot = latest;
     }
-    const auto now = unix_time_ms();
     const auto render_time = Clock::now();
     if (render_time >= next_metrics_read) {
       link_status = read_network_metrics(network_metrics);
       next_metrics_read = render_time + std::chrono::milliseconds(250);
     }
+    // After the read, so a file published mid-frame is never stamped ahead of
+    // the clock it is compared against.
+    const auto now = unix_time_ms();
     const bool live = !snapshot.vehicles.empty() && render_time - snapshot.received_at < std::chrono::seconds(2);
     std::unordered_map<std::string, Vehicle> visible;
     for (const auto & [id, vehicle] : snapshot.vehicles) {
@@ -723,9 +1043,21 @@ int main(int argc, char ** argv)
     BeginMode3D(camera);
     DrawPlane({0.0F, -0.03F, 0.0F}, {map_size, map_size}, {229, 235, 240, 255});
     DrawGrid(static_cast<int>(map_size), 1.0F);
+    sim::world::draw(world, camera.position);
     for (const auto & [id, vehicle] : visible) {
       const Vector3 position{vehicle.east_m, -vehicle.down_m, vehicle.north_m};
-      draw_drone(vehicle, position);
+      if (vehicle.ground) {
+        // One full cycle is two steps, so the phase advances by the distance
+        // covered divided by a stride pair. A stopped robot holds its phase
+        // rather than resetting, which would snap the legs together.
+        constexpr float stride_pair_m = 1.1F;
+        float & phase = gait_phase[id];
+        phase = std::fmod(
+          phase + vehicle.speed_mps / stride_pair_m * 2.0F * PI * GetFrameTime(), 2.0F * PI);
+        draw_robot(vehicle, position, phase);
+      } else {
+        draw_drone(vehicle, position);
+      }
     }
 
     // The network the observer reports, drawn over the fleet.
@@ -760,6 +1092,14 @@ int main(int argc, char ** argv)
         const auto first = peer_to_node.find(link.peer_key_1);
         const auto second = peer_to_node.find(link.peer_key_2);
         if (first == peer_to_node.end() || second == peer_to_node.end()) continue;
+        // Either endpoint having lost the transport means this link is gone,
+        // whatever presence still says. See can_carry.
+        const auto first_info = peer_to_node_info.find(link.peer_key_1);
+        const auto second_info = peer_to_node_info.find(link.peer_key_2);
+        if (first_info != peer_to_node_info.end() &&
+          !can_carry(*first_info->second, link.type)) continue;
+        if (second_info != peer_to_node_info.end() &&
+          !can_carry(*second_info->second, link.type)) continue;
         const auto from = node_positions.find(first->second);
         const auto to = node_positions.find(second->second);
         if (from == node_positions.end() || to == node_positions.end()) continue;
@@ -779,11 +1119,20 @@ int main(int argc, char ** argv)
       // rather than an edge: a stalk rising out of whoever holds one.
       for (const auto & node : net.snapshot.nodes) {
         if (!node.connected_to_cloud) continue;
+        // The cloud flag comes from the peer and lingers past a cut exactly as
+        // a link does, so the stalk is suppressed the same way.
+        if (!can_carry(node, ditto::observer::PathType::cloud)) continue;
         const auto position = node_positions.find(node.node_id);
         if (position == node_positions.end()) continue;
-        const Vector3 top = Vector3Add(position->second, {0.0F, 6.0F, 0.0F});
+        // Sized to the scene rather than fixed. A 6 m stalk reads well over a
+        // 170 m airfield and goes straight up through two floors of a building
+        // with 4 m storeys, which is worse than not drawing it: it puts a cloud
+        // marker in a room that does not hold that node. Scaling it by the same
+        // content span the camera is framed on keeps it legible in both.
+        const float stalk = bounds.valid ? bounds.framing_span_m() * 0.045F : 6.0F;
+        const Vector3 top = Vector3Add(position->second, {0.0F, stalk, 0.0F});
         DrawLine3D(position->second, top, path_color(ditto::observer::PathType::cloud));
-        DrawSphere(top, 0.45F, path_color(ditto::observer::PathType::cloud));
+        DrawSphere(top, stalk * 0.07F, path_color(ditto::observer::PathType::cloud));
       }
     }
     EndMode3D();
@@ -843,7 +1192,7 @@ int main(int argc, char ** argv)
             if (inspected->reachable && actionable && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
               CheckCollisionPointRec(GetMousePosition(), chip))
             {
-              send_toggle({inspected->node_id}, transport.kind, !transport.enabled);
+              send_toggle({inspected->node_id}, {{transport.kind, !transport.enabled}});
             }
             chip_x += 102.0F;
             if (chip_x > 38.0F + 2.0F * 102.0F) {
@@ -912,6 +1261,7 @@ int main(int argc, char ** argv)
     }
     // What the observer says the network is, and the one control that makes
     // the point: the cloud is a path nobody configured a mesh for.
+    Rectangle legend_panel{0.0F, 0.0F, 0.0F, 0.0F};
     if (!observer_endpoint.empty()) {
       // Only nodes that were started with a cloud URL can be told to use one,
       // so they are the only ones the fleet button addresses. Sending to the
@@ -927,14 +1277,32 @@ int main(int argc, char ** argv)
         }
       }
 
+      // Every Ditto link in this simulator is TCP through the relay, so this
+      // is the whole mesh. Both directions are collected together: `tcp_listen`
+      // is always actionable, `tcp_connect` only once a node has peers, and a
+      // node needs to be addressed if either applies.
+      std::vector<std::string> tcp_nodes;
+      bool any_tcp = false;
+      for (const auto & node : net.snapshot.nodes) {
+        if (!node.reachable) continue;
+        bool addressable = false;
+        for (const auto & transport : node.transports) {
+          if (transport.kind != "tcp_connect" && transport.kind != "tcp_listen") continue;
+          if (!transport_actionable(transport, node)) continue;
+          addressable = true;
+          any_tcp = any_tcp || transport.enabled;
+        }
+        if (addressable) tcp_nodes.push_back(node.node_id);
+      }
+
       // Sized before anything is drawn, because the unconfigured case needs a
       // second line and would otherwise spill past the panel.
       const bool cloud_available = !cloud_nodes.empty();
-      const float legend_height = (cloud_available ? 92.0F : 110.0F) +
-        16.0F * static_cast<float>(std::max<std::size_t>(1, net.snapshot.links_by_type.size()));
+      const float legend_height = (cloud_available ? 92.0F : 110.0F) + 30.0F +
+        16.0F * static_cast<float>(std::max<std::size_t>(1, live_links_by_type.size()));
       const float legend_top = static_cast<float>(GetScreenHeight()) - 60.0F - legend_height;
-      DrawRectangleRounded({24.0F, legend_top, 300.0F, legend_height}, 0.06F, 6,
-        {30, 41, 59, 238});
+      legend_panel = {24.0F, legend_top, 300.0F, legend_height};
+      DrawRectangleRounded(legend_panel, 0.06F, 6, {30, 41, 59, 238});
       draw_text("NETWORK OBSERVER", 38, legend_top + 10.0F, 15, RAYWHITE);
       const char * state = net.connected ? "WATCHING" :
         (net.error.empty() ? "CONNECTING" : net.error.c_str());
@@ -942,11 +1310,11 @@ int main(int argc, char ** argv)
         net.connected ? Color{101, 214, 159, 255} : Color{255, 183, 77, 255});
 
       float legend_row = legend_top + 48.0F;
-      if (net.snapshot.links_by_type.empty()) {
+      if (live_links_by_type.empty()) {
         draw_text("no links reported", 38, legend_row, 12, {148, 163, 184, 255});
         legend_row += 16.0F;
       }
-      for (const auto & [kind, count] : net.snapshot.links_by_type) {
+      for (const auto & [kind, count] : live_links_by_type) {
         auto type = ditto::observer::PathType::unspecified;
         if (kind == "bluetooth") type = ditto::observer::PathType::bluetooth;
         else if (kind == "access_point") type = ditto::observer::PathType::access_point;
@@ -966,8 +1334,8 @@ int main(int argc, char ** argv)
       // Fleet-wide cloud control. The cloud carried an entire twenty-node run
       // once while the mesh looked healthy, so being able to cut it from here
       // is the demonstration, not a convenience.
-      const bool any_cloud = net.snapshot.links_by_type.count("cloud") != 0;
-      const float button_top = cloud_available ? legend_height - 32.0F : legend_height - 50.0F;
+      const bool any_cloud = live_links_by_type.count("cloud") != 0;
+      const float button_top = cloud_available ? legend_height - 62.0F : legend_height - 80.0F;
       const Rectangle fleet_button{38.0F, legend_top + button_top, 240.0F, 24.0F};
       if (!cloud_available) {
         // Nothing to offer: say why rather than presenting a control that
@@ -987,8 +1355,68 @@ int main(int argc, char ** argv)
         if (net.connected && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
           CheckCollisionPointRec(GetMousePosition(), fleet_button))
         {
-          send_toggle(cloud_nodes, "websocket_connect", !any_cloud);
+          send_toggle(cloud_nodes, {{"websocket_connect", !any_cloud}});
         }
+      }
+
+      // Fleet-wide TCP control, beneath the cloud one. This is the harder cut
+      // of the two: the cloud is one path that nobody configured a mesh for,
+      // while TCP is the mesh, so cutting it should leave twenty nodes holding
+      // nothing but their own stores.
+      //
+      // Both directions go in one call. `tcp_connect` alone is not isolation --
+      // peers keep dialing in, which is what made a "cut" node carry on
+      // replicating the first time this was measured.
+      const Rectangle tcp_button{38.0F, legend_top + legend_height - 32.0F, 240.0F, 24.0F};
+      if (tcp_nodes.empty()) {
+        DrawRectangleRounded(tcp_button, 0.25F, 4, {39, 44, 54, 255});
+        draw_text("NO TCP TRANSPORTS REPORTED", tcp_button.x + 10.0F, tcp_button.y + 5.0F, 12,
+          {88, 97, 112, 255});
+      } else {
+        DrawRectangleRounded(tcp_button, 0.25F, 4,
+          any_tcp ? Color{127, 29, 29, 255} : Color{22, 101, 52, 255});
+        draw_text(
+          any_tcp ? TextFormat("CUT TCP ON %d NODES", static_cast<int>(tcp_nodes.size())) :
+            TextFormat("RESTORE TCP ON %d NODES", static_cast<int>(tcp_nodes.size())),
+          tcp_button.x + 10.0F, tcp_button.y + 5.0F, 12, RAYWHITE);
+        if (net.connected && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
+          CheckCollisionPointRec(GetMousePosition(), tcp_button))
+        {
+          send_toggle(tcp_nodes, {{"tcp_connect", !any_tcp}, {"tcp_listen", !any_tcp}});
+        }
+      }
+    }
+
+    // Click a vehicle in the world to inspect it -- the same selection the
+    // sidebar rows make, reached by pointing at the thing itself.
+    //
+    // Resolved here, at the end of the frame, because it has to know where the
+    // legend panel ended up. That panel is drawn over the world, so a click on
+    // CUT TCP would otherwise also select whatever drone happens to be behind
+    // it.
+    if (press_in_world && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+      const Vector2 released_at = GetMousePosition();
+      const bool dragged = Vector2Distance(press_at, released_at) > 4.0F;
+      press_in_world = false;
+      if (!dragged && !CheckCollisionPointRec(released_at, legend_panel)) {
+        // The pick radius grows with camera distance. A drone a hundred metres
+        // out is a few pixels across, and selecting it should not demand
+        // precision the view cannot offer.
+        const float pick_radius = std::max(0.9F, distance * 0.012F);
+        const Ray ray = GetScreenToWorldRay(released_at, camera);
+        const std::string * hit = nullptr;
+        float nearest = std::numeric_limits<float>::max();
+        for (const auto & [id, vehicle] : visible) {
+          const Vector3 centre{vehicle.east_m, -vehicle.down_m, vehicle.north_m};
+          const RayCollision collision = GetRayCollisionSphere(ray, centre, pick_radius);
+          if (collision.hit && collision.distance < nearest) {
+            nearest = collision.distance;
+            hit = &id;
+          }
+        }
+        // Clicking bare ground clears the selection, which is how the inspector
+        // gets closed without going back to the row that opened it.
+        selected_vehicle = hit != nullptr ? *hit : std::string();
       }
     }
 
@@ -997,7 +1425,14 @@ int main(int argc, char ** argv)
     }
     EndDrawing();
 
-    if (capture_path != nullptr && !captured && net_ever_seen && ++settle_frames > 90) {
+    // Capture once there is something to look at. This used to wait on the
+    // observer specifically, which made it useless for the two things it is
+    // most wanted for: checking a world file, and checking a fleet, neither of
+    // which needs a mesh to be up. A network run still settles on the same
+    // condition it always did, because net_ever_seen trips first.
+    if (capture_path != nullptr && !captured && (net_ever_seen || !visible.empty()) &&
+      ++settle_frames > 90)
+    {
       TakeScreenshot(capture_path);
       captured = true;
       TraceLog(LOG_INFO, "wrote %s", capture_path);

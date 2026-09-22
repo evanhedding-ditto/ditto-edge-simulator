@@ -1,255 +1,345 @@
 # Ditto Edge Simulator
 
-## Purpose
+A test bench for running a fleet of drones on one laptop, each with its own real
+Ditto Edge Server, and watching how they replicate to each other over a network
+you control.
 
-Build a reusable simulation and benchmarking platform for demonstrating Ditto in distributed
-robotics and autonomy. The platform will support many heterogeneous nodes running realistic
-software stacks while a custom simulated world supplies mission conditions, network disruptions,
-and 3D visualization.
+The point is to put Ditto under realistic load. The autopilots are simulated and
+the radio links are a local relay, but the Edge Servers, the adapters, the
+replication, and the gRPC command path are the real software. Nothing here fakes
+a sync.
 
-The first polished scenario will likely be a collaborative search-and-rescue or ISR mission. The
-platform must remain reusable for smaller inspection, logistics, industrial, and public-safety
-missions.
+## Setting it up
 
-## Product stories
+You need macOS on Apple silicon, Xcode Command Line Tools, [pixi](https://pixi.sh),
+and a Rust toolchain. Nothing comes from Homebrew: gRPC, Protobuf,
+nlohmann_json, CMake and Ninja are all pinned in `pixi.toml`, so every build
+links the same versions on every machine.
 
-1. **Connectivity:** Ditto connects aircraft, ground vehicles, people, Android/ATAK users, operator
-   stations, and Big Peer across changing local, tactical, 5G, and satellite links.
-2. **Distributed autonomy:** Every autonomous node continues planning from its own persistent local
-   knowledge while disconnected, then synchronizes and reconciles information later.
-3. **Competitive performance:** The same deliberate mission and network conditions can
-   eventually compare Ditto with competent DDS- and Zenoh-based implementations.
-
-## Core architecture
-
-Each autonomous vehicle node should run a realistic, isolated stack:
-
-```text
-PX4 or ArduPilot simulation
-        <-> ROS 2, MAVLink, or another adapter
-Local autonomy executive
-        <-> local replicated mission state
-Ditto Edge Server
-        <-> network interfaces controlled by the simulation
+```bash
+pixi install                              # toolchain: process-compose, gRPC, CMake
+pixi run -e ros vcs import deps < dependencies.repos   # ROS scenarios only
 ```
 
-Android users should run the real Ditto Android SDK and ATAK integration. Operator and server nodes
-should use their real Ditto components, including Big Peer where appropriate.
+`dependencies.repos` pins the two external source dependencies by exact revision:
+`px4_msgs` and the Micro XRCE-DDS Agent. Neither is packaged for this platform,
+so both are built from source. Everything fetched lands in the gitignored
+`deps/`.
 
-The custom simulator does not control vehicles directly. Autonomy software issues real movement
-commands through each vehicle interface, and the autopilot remains responsible for vehicle motion.
-PX4 SIH and comparable lightweight autopilot simulation are the initial scale path. Gazebo is out
-of scope for the current phase.
+PX4 is cloned separately, because it is submodule-heavy and vcstool handles
+submodules poorly:
 
-## Repository structure
-
-```text
-core/       Lifecycle, orchestration, and scenario execution
-world/      Terrain, obstacles, targets, hazards, sensor truth, and agent ground truth
-network/    Bearers, topology, range/obstruction models, impairments, and traffic measurement
-viewer/     Read-only raylib 3D operational, knowledge, autonomy, and network views
-recording/  Deferred event capture and metrics
-scenarios/  Mission-specific node composition, configuration, events, and autonomy selection
+```bash
+git clone --recursive --branch v1.18.0-rc1 \
+  https://github.com/PX4/PX4-Autopilot.git deps/PX4-Autopilot
+cd deps/PX4-Autopilot && make px4_sitl_sih
 ```
 
-The modules may become separate executables, but they should remain in this repository until their
-boundaries are proven.
+`v1.18.0-rc1` is the revision this simulator is validated against. Required for
+every scenario, synthetic included.
 
-## Scenario responsibility
+**Edge Server and the adapters do not have to be built.** Drop prebuilt
+binaries in `bin/` -- `ditto-edge-server`, `px4-mavlink-ditto-bridge`,
+`px4_ditto_bridge_node` -- and the simulator uses them ahead of any local build
+and never rebuilds over them. That removes the Edge Server cargo build and the
+adapter builds. It does **not** remove the adapters checkout or the Rust
+toolchain: the C++ SDKs are compiled from that tree for the viewer and command
+client, and the network observer is cargo-built on every run. See
+`bin/README.md`.
 
-A scenario declares:
+**Only ROS scenarios pay for ROS.** ROS 2 Jazzy, colcon, `px4_msgs` and the XRCE
+agent live in a separate pixi environment and are built only when a scenario
+declares ROS vehicles. Synthetic scenarios install none of it.
 
-- Which nodes exist and their initial locations.
-- Whether each node is an aircraft, ground vehicle, person, operator, relay, or server.
-- Its autopilot or runtime: PX4, ArduPilot, Android, or none.
-- Its adapter: ROS 2, MAVLink, ATAK, or another supported integration.
-- Its capabilities, sensors, network interfaces, and radio profiles.
-- The mission-specific autonomy program it runs.
-- Terrain, targets, hazards, scheduled events, and success criteria.
+**Every scenario needs PX4 though**, even the synthetic ones: the viewer, the
+relay probe, both fleets and the MAVLink adapter all compile against the MAVLink
+headers that `px4_sitl_sih` generates, and the build stops with an error without
+them.
 
-Scenarios configure reusable node templates; they should not duplicate the implementations of
-autopilots, Edge Server, adapters, networking, or visualization.
+```bash
+./scripts/build/ros-underlay.sh    # px4_msgs; only for ROS scenarios
+```
 
-## Autonomy boundary
+Credentials go in a gitignored `.env` at the repository root -- `DITTO_DB_ID`,
+`DITTO_AUTH_URL`, `DITTO_ACCESS_TOKEN`, plus `DITTO_WEBSOCKET_URL` if you start
+with `SIM_ENABLE_CLOUD_SYNC=1`. Point `DITTO_EDGE_ENV_FILE` elsewhere to
+override it.
 
-Mission decision-making remains outside the simulator and runs locally on each autonomous node.
-Initially, only the repetitive integration pattern should be standardized:
-
-- Observe and query local Ditto state.
-- React to locally visible changes.
-- Publish observations, tasks, claims, intent, and outcomes.
-- Convert decisions into ROS 2, MAVLink, or other vehicle commands.
-- Record decisions and execution results for replay.
-
-Actual search, allocation, planning, and replanning policies may be mission-specific. Reusable
-autonomy abstractions should emerge from working scenarios rather than being designed prematurely.
-
-## Visualization goals
-
-The raylib viewer will render full 3D position, attitude, trajectories, terrain, agents, targets,
-tasks, routes, sensor footprints, and network links. It should eventually provide four focused
-presentation modes:
-
-1. Full operational picture.
-2. A selected node's local knowledge, including divergence and later convergence.
-3. A selected node's autonomy decisions and replanning.
-4. Network behavior and controlled benchmark results.
-
-ATAK and WebTAK remain real operator views. The custom viewer is the instrumented view used to
-explain global truth, internal knowledge, networking, and autonomy behavior.
-
-## Foundational rules
-
-- Global simulation truth must never leak directly into local autonomy decisions.
-- Every node acts only on information available through its local interfaces and local Ditto store.
-- Network disruption must affect real traffic rather than merely changing a visual indicator.
-- Comparisons must measure mission outcomes and equivalent correctness, not manufacture weak DDS
-  or Zenoh baselines.
-- The platform should scale down to a few nodes as naturally as it scales up to a large operation.
-
-## Rough path forward
-
-1. Prove the two-vehicle PX4/ROS 2/gRPC Edge Server slice with Process Compose.
-2. Generalize node declarations and generate isolated multi-node runtime configurations.
-4. Add the world service and connect it to the existing raylib 3D viewer.
-5. Add position-dependent network topology and controlled real-traffic impairment.
-6. Implement the first real local autonomy executive and collaborative search scenario.
-7. Add knowledge-state inspection and metrics if real scenarios need them.
-8. Add Android/ATAK, heterogeneous vehicles, multiple bearers, and Big Peer.
-9. Build deliberate DDS and Zenoh comparison experiments after Ditto behavior is established.
-
-## MVP: PX4 vehicle fleet
-
-The default executable slice has two PX4 SIH vehicles, one Edge Server per vehicle, a
-non-autonomous operator Edge Server, and ROS 2 adapters connected through gRPC over Unix sockets.
-The viewer reads PX4's self-published pose and the simulator-owned link metrics, so its display
-remains independent of operator knowledge and does not poll vehicle Edge Server APIs.
-
-Start a complete, managed session with one command:
+## Running it
 
 ```bash
 pixi run sim
 ```
 
-It builds missing local artifacts, starts the fleet, and opens the viewer. Closing the viewer
-always stops every Process Compose node. In another terminal, submit commands with
-`./scripts/command.sh ...`. `pixi run sim-status` shows a running fleet; `pixi run sim-down` is
-an idempotent emergency stop.
+That builds anything missing, starts the fleet under Process Compose, waits for
+telemetry, and opens the viewer. Closing the viewer shuts everything down. With
+no argument you get `mvp-two-px4`: two PX4 vehicles.
 
-The viewer reads PX4 SIH's dedicated MAVLink display stream directly; it does not use Edge Server,
-adapter, or replicated state, so it remains valid during Edge-path fault injection.
-
-The operator command client writes the shared `fleet_commands/fleet-current` intent document
-through the operator Edge Server. Each vehicle executes only its own entry and writes an
-independent `fleet_command_receipts` document; all three fleet collections (`vehicle_state`,
-`fleet_commands`, and receipts) are subscribed mesh-wide. This exercises the Ditto path rather
-than talking to PX4 directly:
-
-```bash
-./scripts/build-command.sh
-./scripts/command.sh goto px4_0 15 -10 5
-./scripts/command.sh orbit px4_1 0 0 5 10 3
-./scripts/command.sh status px4_0
-```
-
-Credentials default to the ignored `.env` at this repository's root. Set
-`DITTO_EDGE_ENV_FILE` to use a different compatible file. Runtime state and rendered
-configurations stay under ignored `build/`.
-
-Changing credentials does not require a code rebuild: the managed launcher re-renders its Edge
-Server configuration on every start. If `DITTO_DB_ID` changes, remove the generated scenario
-runtime state under `build/runtime/mvp-two-px4/` before the next run.
-
-Closing a managed simulation stops every process and clears its local Edge persistence. The
-viewer ignores cloud-replicated state from earlier runs until each PX4 publishes fresh telemetry.
-
-### Four-node ROS 2 + MAVLink telemetry test
-
-The mixed scenario runs ROS 2 on `px4_0` and `px4_1`, and the native MAVLink telemetry adapter on
-`px4_2` and `px4_3`:
-
-```bash
-SIM_SCENARIO_FILE="$PWD/scenarios/mvp-four-mixed.env" pixi run sim
-```
-
-The MAVLink nodes mirror telemetry into the shared vehicle-state schema and accept the same arm,
-go-to, and orbit commands as their ROS 2 peers.
-
-With that fleet running, launch four separated trajectories through the operator with:
-
-```bash
-./scripts/demo-four.sh
-```
-
-`px4_0` and `px4_2` fly to opposing waypoints; `px4_1` and `px4_3` fly opposing orbits.
-
-### Twenty-node ROS 2 + MAVLink fleet
-
-This scenario runs ROS 2 adapters on `px4_0` through `px4_9` and native MAVLink adapters on
-`px4_10` through `px4_19`:
-
-```bash
-SIM_SCENARIO_FILE="$PWD/scenarios/mvp-twenty-mixed.env" pixi run sim
-```
-
-The launcher waits until all 20 vehicles have published through the operator before opening the
-viewer. Run the demo only after the viewer appears.
-
-In a second terminal, command all 20 nodes with:
-
-```bash
-./scripts/demo-twenty.sh
-```
-
-PX4 normally collapses MAVLink destinations for instances above nine onto one UDP port. The
-launcher creates isolated runtime PX4 startup files for `px4_10` through `px4_19`, so each keeps
-its own MAVLink stream and is visible to its corresponding adapter. Those streams are capped at
-100 KB/s per vehicle so all ten native adapters keep up.
-
-The viewer fixes its horizontal origin to the configured PX4 home position and uses a wider map
-for fleets larger than four, so restarting the viewer after vehicles have moved does not displace
-the fleet.
-
-### Synthetic fleets, and the network observer
-
-A scenario can be named as an argument, which is shorter than spelling out
-`SIM_SCENARIO_FILE`:
+Name a scenario to get a different fleet:
 
 ```bash
 pixi run sim synthetic-twenty
 ```
 
-The two in regular use have their own tasks:
+Two shortcuts exist for the ones in regular use:
 
 ```bash
-pixi run sim-twenty
-pixi run sim-hundred
+pixi run sim-twenty     # synthetic-twenty
+pixi run sim-hundred    # synthetic-hundred
 ```
 
-A synthetic scenario replaces the whole autopilot and adapter tier with one
-kinematic process, so twenty vehicles cost twenty-one Edge Servers plus three
-processes instead of seventy-two. The Edge Servers are the thing under test and
-are still real, one per vehicle.
+`pixi run sim-factory` runs `factory-twenty`, twenty ground robots in a
+three-level building; `pixi run demo-factory` shows that world with no network
+at all. `pixi run sim-status` tells you whether a fleet is up. `pixi run sim-down` stops
+one; it is safe to run when nothing is running.
 
-**The network observer starts with the fleet.** It is a process in the same
-process-compose session, so it comes up with everything else and
-`pixi run sim-down` — or simply closing the viewer — stops it. It reports every
-transport path each node is using and can disable individual paths on command,
-which the viewer draws as links coloured per transport, with a per-node chip to
-toggle one and a fleet-wide button for the cloud.
+Only one scenario at a time. Starting a second while the first is up is refused.
 
-Every client shares one address, `SIM_OBSERVER_ADDR`, default
-`127.0.0.1:50090`. Query it without the viewer using either reference client:
+## Scenarios
+
+| name | vehicles | what it is |
+| --- | --- | --- |
+| `mvp-two-px4` | 2 PX4 | the default, and the smallest thing that proves the whole path |
+| `mvp-four-mixed` | 4 PX4 | two ROS 2 adapters, two native MAVLink adapters |
+| `mvp-twenty-mixed` | 20 PX4 | ten of each adapter; the real-stack ceiling on one machine |
+| `synthetic-twenty` | 20 synthetic | same shape as the above, without PX4 itself |
+| `synthetic-hundred` | 100 synthetic | 100 Edge Servers in a five-peer mesh |
+
+The synthetic scenarios replace the autopilot, and only the autopilot. One
+process emulates N PX4s: a kinematic integrator wearing PX4's MAVLink manners,
+streaming the same messages on the same schedule and honouring the same
+arm-and-offboard handshake, down to refusing offboard until setpoints are
+already flowing.
+
+Everything above that is real. Each vehicle gets its own
+`px4-mavlink-ditto-bridge` process — the same binary a PX4 vehicle uses — and
+that adapter does every Ditto write. So a synthetic run exercises the shipped
+adapter, its MAVLink codec, its command state machine, and its Edge Server
+client, in production's process shape.
+
+What it costs is the autopilot: no EKF, no controllers, no rcS, no XRCE. Twenty
+vehicles is 44 processes instead of 73, and a hundred is reachable at all.
+
+Both tiers are worth running. The PX4 scenarios prove PX4. The synthetic ones
+find where Edge Server breaks.
+
+## What a node is
+
+Each vehicle is a self-contained stack with its own persistent store:
+
+```text
+PX4 SIH, or an emulated PX4 from the synthetic fleet
+    <-> ROS 2 or MAVLink adapter        (MAVLink only, for a synthetic vehicle)
+        <-> Ditto Edge Server
+            <-> relay-controlled network
+```
+
+The adapter is a separate process in both tiers. Only the autopilot differs.
+
+Process Compose only supervises these processes. It does not connect them.
+
+The autopilot owns vehicle motion. Commands reach a vehicle by replicating into
+its local Edge Server; nothing in the simulator moves a drone directly.
+
+## Commanding the fleet
+
+The command client writes one shared `fleet_commands/fleet-current` document
+through the operator's Edge Server. Each vehicle picks out its own entry, runs
+it, and writes back to `fleet_command_receipts`. All three collections
+(`vehicle_state`, `fleet_commands`, receipts) are subscribed mesh-wide, so a
+command exercises the replication path rather than a side channel.
+
+```bash
+./scripts/build/command-client.sh
+./scripts/command.sh goto px4_0 15 -10 5
+./scripts/command.sh orbit px4_1 0 0 5 10 3
+./scripts/command.sh status px4_0
+```
+
+`arm`, `disarm`, `goto`, `orbit`, `status`, `ready`, `verify`, and `batch` are
+the available verbs; run the client with no arguments for the full argument
+lists.
+
+A command carries a deadline, `expires_unix_ms`, and the **adapter** enforces it
+on arrival -- a late one is rejected with `command_expired` and a receipt, not
+executed. The document still replicates, so an expired command is easy to
+mistake for replication having failed. The TTL is 240 s; set `SIM_COMMAND_TTL_S`
+to raise it for a partition test meant to outlast that:
+
+```bash
+SIM_COMMAND_TTL_S=1800 ./scripts/demo/twenty-spread.sh
+```
+
+A fleet does not move until it is commanded. On startup everything sits at the
+origin. The demo scripts give you something to look at:
+
+```bash
+./scripts/demo/four.sh              # mvp-four-mixed: opposing waypoints and orbits
+./scripts/demo/twenty-spread.sh     # mvp-twenty-mixed: twenty orbits across the map
+./scripts/demo/twenty-converge.sh   # mvp-twenty-mixed: pull it back in
+```
+
+Each demo defaults to the scenario it was written for. To drive a synthetic
+fleet with the twenty-node demos, point them at the running scenario, or they
+will read the wrong runtime tree and appear to do nothing:
+
+```bash
+SIM_SCENARIO_FILE="$PWD/scenarios/synthetic-twenty.env" ./scripts/demo/twenty-spread.sh
+```
+
+## The network, and seeing it
+
+Every Ditto TCP connection goes through the simulator's own relay
+(`network/relay.cpp`). The relay is deliberately dumb: an opaque byte-stream
+path that enforces the scenario's per-direction capacity budget and reports
+per-link connection, TX, RX, and utilization to `network-metrics.json`. Ditto
+still owns peer selection, subscriptions, reconciliation, and encryption.
+Keeping the relay outside PX4, the adapters, and Edge Server means watching a
+run does not add replication traffic of its own.
+
+Three scenario knobs shape the mesh:
+
+- `SIM_MESH_PEERS_PER_VEHICLE` — how many succeeding vehicles each one lists as
+  a known TCP peer, making a directed ring.
+- `SIM_OPERATOR_MESH_PEERS` — how many evenly spaced points the operator
+  attaches at.
+- `SIM_NETWORK_LINK_CAPACITY_KBPS` — the per-direction budget per link.
+
+The relay does not yet model delay, jitter, loss, or range. When it does, it
+belongs here, in front of real traffic.
+
+The network observer starts with the fleet as another Process Compose process,
+so it comes up and goes down with everything else. It reports which transport
+each node is actually using and can cut individual paths on command. The viewer
+draws those as links coloured by transport, with a per-node toggle and a
+fleet-wide button for the cloud. Every client shares one address,
+`SIM_OBSERVER_ADDR`, default `127.0.0.1:50090`. You can query it without the
+viewer:
 
 ```bash
 ../Ditto-Edge-Server/ditto-edge-adapters/target/debug/examples/netctl show
 build/cmake/ditto_observer_client/ditto_observer_ctl show
 ```
 
-Two things the default deliberately does not do. The fleet **does not move
-until it is commanded**, so the links all sit on the origin until you run
-`./scripts/demo-twenty_spread.sh`. And the **Ditto Cloud link is off**; start
-with `SIM_ENABLE_CLOUD_SYNC=1` to see it, at which point the observer draws a
-stalk on every node that holds one. Cloud paths never appear in a presence
-graph's connections, so the observer synthesises those edges from each peer's
-`is_connected_to_ditto_cloud` flag rather than leaving them out.
+The Ditto Cloud link is off by default. Start with `SIM_ENABLE_CLOUD_SYNC=1` to
+see it, and the observer draws a stalk on every node holding one. Cloud paths
+never show up in a presence graph's connections, so the observer synthesises
+those edges from each peer's `is_connected_to_ditto_cloud` flag.
+
+## The world
+
+Scenery, and only scenery. A scenario may name a world file:
+
+```
+SIM_WORLD_FILE=worlds/factory-three-level.json
+```
+
+**The twenty-node scenarios declare no world and run on empty ground.** That is
+deliberate: the fleet is what those scenarios are for, and blocks standing under
+it read as clutter rather than context. The loader is here for worlds that earn
+their place, like the factory scenario, where the building *is* the scenario.
+
+Objects are declared in the same PX4 local NED frame the commands are spelled
+in -- north, east, and metres above home -- so a world file can be written
+straight off a demo script's coordinates. `box` and `cylinder` are the shapes;
+`base_m` raises an object's underside off the ground for a storey above the
+first; `style` is `solid`, `wire`, or `translucent` with an `opacity`.
+
+**The world is drawn and nothing more.** No autopilot integrates against it, no
+adapter publishes it, and no Ditto store holds it, so a vehicle flies or drives
+through a wall without complaint. That is the ground rule below about simulator
+truth being honoured the cheap way: truth a vehicle must not have is truth the
+simulator never sends. Giving an object physical consequence belongs on the
+autopilot side of the MAVLink boundary, where a vehicle reads the world itself
+and constrains its own motion -- one file read by two processes, never a channel
+from the viewer to a vehicle.
+
+A world's `extent_m` sizes the ground plane. The camera frames on the objects
+instead, because the plane is deliberately wider than what stands on it, and it
+points at their centre in all three axes rather than at a fixed point near the
+origin. Horizontally it frames on the footprint's diagonal, since the default
+view is yawed 45 degrees and the content presents corner-to-corner; height is
+compared against that rather than folded into it, so it decides the distance
+only for something tall on a small plot.
+
+A missing or malformed world file is not an error; the viewer draws bare ground.
+A single malformed object is skipped and the rest of the world still stands. The
+vehicle-side reader is stricter about its own section: `factory_fleet` refuses
+to start on a malformed `building`, because a fleet with no floor plan has nowhere
+to drive, and twenty robots silently stacked at the origin is worse than a
+refusal. Same file, two readers, two tolerances.
+
+## The viewer
+
+raylib, 3D, read-only. It parses PX4's dedicated MAVLink display stream straight
+off UDP and reads the relay's link metrics. It does not talk to Edge Server, an
+adapter, or any replicated state, which is the whole reason it stays trustworthy
+while you are breaking the Ditto path on purpose.
+
+It pins its horizontal origin to the configured PX4 home position and widens the
+map past four vehicles, so restarting it mid-flight does not shift the fleet.
+
+## Layout
+
+```text
+scenarios/   one .env per fleet: node count, ports, mesh shape, capacity
+config/      Edge Server and Process Compose templates
+scripts/     lib.sh, and the five things you invoke: sim, down, status,
+             command, px4-phases
+scripts/build/     one per build artifact
+scripts/process/   what Process Compose launches, one per process type
+scripts/session/   the steps of a launch: up, render, wait, viewer
+scripts/demo/      canned fleet orders
+network/     the capacity relay
+viewer/      the raylib view
+worlds/      static scenery, drawn by the viewer and read by nothing else
+tools/       command client, telemetry probe, synthetic fleet
+bin/         drop prebuilt binaries here; gitignored
+patches/     local fixes to external sources, applied at build time
+deps/        gitignored: fetched sources -- PX4, px4_msgs, the XRCE agent
+build/       gitignored: everything built, plus per-node stores and logs
+```
+
+The adapters and the Edge Server client are not in this repository. They live in
+`Ditto-Edge-Server/ditto-edge-adapters/`, and the build also needs PX4 with a
+built `px4_sitl_sih`. Each external checkout is looked for in `deps/` first and
+then beside this repository, so either layout works; `SIM_PX4_ROOT`,
+`SIM_EDGE_SERVER_ROOT`, and `SIM_EDGE_ADAPTERS_ROOT` override individually.
+
+Until 2026-09-22 the ROS underlay, the XRCE agent, the process supervisor, and
+the fleet's home position all came from a separate `ditto-autonomy-testing`
+checkout. That repository is gone and everything it supplied is declared here.
+
+## Configuration
+
+Credentials come from the gitignored `.env` at the repository root. Point
+`DITTO_EDGE_ENV_FILE` somewhere else to override it. You do not need to rebuild
+after changing credentials; the launcher re-renders Edge Server configuration on
+every start. If `DITTO_DB_ID` changes, delete the runtime tree for that scenario
+under `build/runtime/<scenario>/` first.
+
+Everything generated — rendered configuration, per-node stores, logs — lives
+under the gitignored `build/`. A managed shutdown clears local Edge persistence
+but keeps the logs. The viewer ignores cloud-replicated state left over from an
+earlier run until each vehicle publishes something fresh.
+
+## Ground rules
+
+These are the constraints the design is actually built around, and breaking one
+invalidates results rather than just being untidy:
+
+- Simulator truth never reaches an autonomy decision. A node acts only on what
+  arrives through its own interfaces and its own Ditto store.
+- Network disruption has to hit real traffic. Changing a number on a display is
+  not a disrupted link.
+- Any comparison against DDS or Zenoh measures mission outcome and equivalent
+  correctness. A baseline built badly on purpose proves nothing.
+- Scaling down to three nodes should be as easy as scaling up to a hundred.
+
+## Where to look next
+
+`PROJECT_STATUS.md` has the current state, the decisions being held, what has
+been validated, and what is next. `DEBUGGING.md` has the startup contract, the
+non-regression rules, and an index into the knowledge store for past
+investigations. Read `DEBUGGING.md` before changing anything about startup
+ordering, MAVLink ports, adapter ordering, or shutdown.

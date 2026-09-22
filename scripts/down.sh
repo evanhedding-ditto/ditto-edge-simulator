@@ -34,8 +34,7 @@ terminate_pids() {
 
 compose_down() {
   local client deadline
-  pixi run --manifest-path "$SIM_PROTOTYPE_ROOT/pixi.toml" process-compose \
-    -p "$SIM_PROCESS_COMPOSE_PORT" --ordered-shutdown down >/dev/null 2>&1 &
+  sim_compose --ordered-shutdown down >/dev/null 2>&1 &
   client=$!
   deadline="$((SECONDS + ${SIM_SHUTDOWN_TIMEOUT_SECONDS:-20}))"
   while kill -0 "$client" 2>/dev/null; do
