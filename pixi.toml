@@ -40,6 +40,7 @@ sim-hundred = "./scripts/sim.sh synthetic-hundred"
 sim-factory = "./scripts/sim.sh factory-twenty"
 sim-down = "./scripts/down.sh"
 sim-status = "./scripts/status.sh"
+build-cesium-native = "./scripts/build/cesium-native.sh"
 
 # Deliberately NOT named sim-*: this is the factory world and its robots with
 # no network at all -- no Edge Server, no relay, no adapters, no observer, and

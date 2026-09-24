@@ -1,0 +1,54 @@
+{
+  "name": "Park MGM / Las Vegas Strip, 1 km",
+  "extent_m": 1000,
+  "view_distance_m": 550,
+  "view_target_height_m": 20,
+  "model": "park-mgm-1km.obj",
+  "bounds": [
+    -500,
+    500,
+    -500,
+    500,
+    0,
+    183.0
+  ],
+  "attribution": "Map: OpenStreetMap (ODbL) | Aerial: USGS The National Map",
+  "landmarks": [
+    {
+      "name": "PARK MGM",
+      "east_m": -271.17858628955776,
+      "north_m": 72.81051670392755,
+      "height_m": 120.0
+    },
+    {
+      "name": "ARIA",
+      "east_m": -313.2075368290409,
+      "north_m": 361.1423444555265,
+      "height_m": 45.0
+    },
+    {
+      "name": "NEW YORK-NEW YORK",
+      "east_m": -111.11630095690114,
+      "north_m": -225.35492125525417,
+      "height_m": 45.0
+    },
+    {
+      "name": "MGM GRAND",
+      "east_m": 214.55256069080866,
+      "north_m": -211.00966190599743,
+      "height_m": 45.0
+    },
+    {
+      "name": "T-MOBILE ARENA",
+      "east_m": -412.7024744856256,
+      "north_m": -147.20718908584152,
+      "height_m": 45.0
+    }
+  ],
+  "origin": {
+    "lat": 36.1040361,
+    "lon": -115.1731679
+  },
+  "source": "https://api.openstreetmap.org/api/0.6/map?bbox=-115.178727,36.099545,-115.167609,36.108528",
+  "aerial_source": "https://imagery.nationalmap.gov/arcgis/rest/services/USGSNAIPPlus/ImageServer/exportImage"
+}

@@ -100,6 +100,7 @@ Only one scenario at a time. Starting a second while the first is up is refused.
 | name | vehicles | what it is |
 | --- | --- | --- |
 | `mvp-two-px4` | 2 PX4 | the default, and the smallest thing that proves the whole path |
+| `park-mgm-two-px4` | 2 PX4 | the same stack over a 1 km display-only map around Park MGM |
 | `mvp-four-mixed` | 4 PX4 | two ROS 2 adapters, two native MAVLink adapters |
 | `mvp-twenty-mixed` | 20 PX4 | ten of each adapter; the real-stack ceiling on one machine |
 | `synthetic-twenty` | 20 synthetic | same shape as the above, without PX4 itself |
@@ -268,6 +269,15 @@ vehicle-side reader is stricter about its own section: `factory_fleet` refuses
 to start on a malformed `building`, because a fleet with no floor plan has nowhere
 to drive, and twenty robots silently stacked at the origin is worse than a
 refusal. Same file, two readers, two tolerances.
+
+`pixi run sim park-mgm-two-px4` places two real PX4 vehicles at Park MGM and
+loads a 1 km static Strip map. It draws OSM building footprints raised by their
+recorded height or floor count, with USGS NAIP Plus aerial imagery on the ground
+and roofs, plus five landmark labels. Heights missing from OSM are estimated;
+this map is for visual orientation, not obstacle avoidance. These are generated
+extrusions, not 3D tiles. `worlds/build-park-mgm.py` regenerates the mesh from a
+local OSM XML extract. The world file records the OSM and USGS sources; the
+viewer displays both attributions. The imagery is public domain per USGS.
 
 ## The viewer
 

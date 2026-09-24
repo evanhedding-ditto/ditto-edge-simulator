@@ -4,10 +4,22 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 sim_init
 viewer="$SIM_ROOT/build/cmake/ditto_fleet_viewer"
+if [[ "${SIM_VIEWER:-raylib}" == "cesium-native" ]]; then
+  viewer="$SIM_ROOT/build/cmake-cesium/ditto_fleet_viewer_cesium"
+  if [[ -z "${CESIUM_ACCESS_TOKEN:-}" && -r "$SIM_ROOT/.env" ]]; then
+    # shellcheck disable=SC1091
+    source "$SIM_ROOT/.env"
+  fi
+  [[ -n "${CESIUM_ACCESS_TOKEN:-}" ]] || die "set CESIUM_ACCESS_TOKEN in .env"
+  export CESIUM_ACCESS_TOKEN SIM_VIEWER_USE_CESIUM=1
+fi
 [[ -x "$viewer" ]] || die "build the viewer first"
 # The viewer pins its horizontal origin to the fleet's home position, so a
 # mid-flight restart does not shift the map.
 export SIM_VIEWER_ORIGIN_LAT="$PX4_HOME_LAT" SIM_VIEWER_ORIGIN_LON="$PX4_HOME_LON"
+if [[ "${SIM_VIEWER:-raylib}" == "cesium-native" ]]; then
+  export SIM_VIEWER_ORIGIN_ALT="$PX4_HOME_ALT"
+fi
 arguments=()
 for ((index = 0; index < SIM_VEHICLE_COUNT; ++index)); do
   arguments+=(--vehicle "px4_$index" --port "$((19410 + index))")

@@ -3,6 +3,12 @@ set -euo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 sim_init
+# macOS caps a Unix socket path at 103 bytes, and an Edge Server that cannot
+# bind its socket crash-loops until the readiness gate times out minutes later.
+# The operator's is the longest node socket, so refuse up front on it.
+socket="$(node_socket operator)"
+(( ${#socket} <= 103 )) ||
+  die "Edge socket path is ${#socket} bytes, over macOS's 103: $socket (shorten SIM_SCENARIO_ID)"
 load_ditto_credentials
 if sim_compose process list >/dev/null 2>&1; then
   die "a simulator session is already running; use 'pixi run sim-down' first"

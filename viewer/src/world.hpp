@@ -17,6 +17,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
@@ -38,6 +39,14 @@ namespace sim::world {
 /// them, this is what has to move with it.
 constexpr float kDefaultYawRad = 0.78F;
 constexpr float kDefaultPitchRad = 0.55F;
+
+/// Viewer axes are (x, y, z) = (east, up, south): right-handed like raylib.
+/// North on +z mirrors the map, and a real mesh drawn that way is inside out
+/// under backface culling.
+inline Vector3 view_point(const float east_m, const float up_m, const float north_m)
+{
+  return {east_m, up_m, -north_m};
+}
 
 enum class Shape { box, cylinder };
 
@@ -72,14 +81,28 @@ struct Object
   Color color{150, 158, 170, 255};
 };
 
+struct Landmark
+{
+  std::string name;
+  Vector3 position;
+};
+
 struct World
 {
   std::string name;
   std::string path;
+  std::string attribution;
   float extent_m{};
+  float view_distance_m{};
+  float view_target_height_m{};
   std::vector<Object> objects;
+  std::vector<Landmark> landmarks;
+  Model model{};
+  bool model_loaded{};
+  std::array<float, 6> model_bounds{};  // north low/high, east low/high, floor/top
+  bool model_bounds_valid{};
 
-  bool empty() const { return objects.empty(); }
+  bool empty() const { return objects.empty() && !model_loaded; }
 };
 
 inline Color color_from(const nlohmann::json & object, const Color fallback)
@@ -106,7 +129,7 @@ inline bool positive_finite(const float value)
 /// object that will not parse is skipped on its own and the rest of the world
 /// still stands -- one wrong field in a large hand-written world file should
 /// cost you that wall, not every wall.
-inline World read(const std::string & path)
+inline World read(const std::string & path, const bool load_model = true)
 {
   World world;
   if (path.empty()) return world;
@@ -117,6 +140,33 @@ inline World read(const std::string & path)
     world.path = path;
     world.name = document.value("name", "world");
     world.extent_m = document.value("extent_m", 0.0F);
+    world.view_distance_m = document.value("view_distance_m", 0.0F);
+    world.view_target_height_m = document.value("view_target_height_m", 0.0F);
+    world.attribution = document.value("attribution", "");
+    if (const auto labels = document.find("landmarks"); labels != document.end() && labels->is_array()) {
+      for (const auto & label : *labels) {
+        try {
+          world.landmarks.push_back({label.at("name").get<std::string>(),
+            view_point(label.at("east_m").get<float>(), label.at("height_m").get<float>(),
+              label.at("north_m").get<float>())});
+        } catch (const std::exception &) {}
+      }
+    }
+    const auto model_name = document.value("model", "");
+    if (!model_name.empty() && load_model) {
+      const auto separator = path.find_last_of("/\\");
+      const std::string model_path = separator == std::string::npos ? model_name :
+        path.substr(0, separator + 1) + model_name;
+      world.model = LoadModel(model_path.c_str());
+      world.model_loaded = IsModelValid(world.model);
+      const auto bounds = document.find("bounds");
+      if (world.model_loaded && bounds != document.end() && bounds->is_array() && bounds->size() == 6) {
+        for (std::size_t i = 0; i < 6; ++i) world.model_bounds[i] = bounds->at(i).get<float>();
+        const auto & b = world.model_bounds;
+        world.model_bounds_valid = std::all_of(b.begin(), b.end(), [](float x) { return std::isfinite(x); }) &&
+          b[0] < b[1] && b[2] < b[3] && b[4] <= b[5];
+      }
+    }
     const auto objects = document.find("objects");
     if (objects == document.end() || !objects->is_array()) return world;
     for (const auto & entry : *objects) {
@@ -167,6 +217,8 @@ inline World read(const std::string & path)
     }
   } catch (const std::exception &) {
     world.objects.clear();
+    if (world.model_loaded) UnloadModel(world.model);
+    world.model_loaded = false;
   }
   return world;
 }
@@ -194,8 +246,7 @@ struct Bounds
   /// frame, and a three-storey building is off-centre vertically at 3 m.
   Vector3 target() const
   {
-    // Viewer axes are (x, y, z) = (east, altitude, north).
-    return {centre_east_m, (floor_m + top_m) * 0.5F, centre_north_m};
+    return view_point(centre_east_m, (floor_m + top_m) * 0.5F, centre_north_m);
   }
 
   /// The span to frame on.
@@ -229,6 +280,11 @@ inline Bounds content_bounds(const World & world)
 {
   Bounds bounds;
   float north_low = 0.0F, north_high = 0.0F, east_low = 0.0F, east_high = 0.0F;
+  if (world.model_bounds_valid) {
+    const auto & b = world.model_bounds;
+    north_low = b[0]; north_high = b[1]; east_low = b[2]; east_high = b[3];
+    bounds.floor_m = b[4]; bounds.top_m = b[5]; bounds.valid = true;
+  }
   for (const auto & object : world.objects) {
     const float half_north = object.shape == Shape::box
       ? object.size_north_m * 0.5F : object.radius_m;
@@ -269,11 +325,12 @@ inline Bounds content_bounds(const World & world)
 /// interpenetrate.
 inline void draw(const World & world, const Vector3 camera_position)
 {
+  if (world.model_loaded) DrawModel(world.model, {0.0F, 0.0F, 0.0F}, 1.0F, WHITE);
   const auto shape_of = [](const Object & object, const Color fill, const bool wires_only) {
-    // Viewer axes are (x, y, z) = (east, altitude, north). An object rises from
-    // its underside, so the centre sits half a height above `base_m`.
-    const Vector3 base{object.east_m, object.base_m, object.north_m};
-    const Vector3 centre{object.east_m, object.base_m + object.height_m * 0.5F, object.north_m};
+    // An object rises from its underside, so the centre sits half a height
+    // above `base_m`.
+    const Vector3 base = view_point(object.east_m, object.base_m, object.north_m);
+    const Vector3 centre = view_point(object.east_m, object.base_m + object.height_m * 0.5F, object.north_m);
     if (object.shape == Shape::box) {
       const Vector3 size{object.size_east_m, object.height_m, object.size_north_m};
       if (!wires_only) DrawCubeV(centre, size, fill);
@@ -302,9 +359,11 @@ inline void draw(const World & world, const Vector3 camera_position)
   if (translucent.empty()) return;
 
   const auto distance_squared = [&](const Object * object) {
-    const float dx = object->east_m - camera_position.x;
-    const float dy = object->base_m + object->height_m * 0.5F - camera_position.y;
-    const float dz = object->north_m - camera_position.z;
+    const Vector3 at =
+      view_point(object->east_m, object->base_m + object->height_m * 0.5F, object->north_m);
+    const float dx = at.x - camera_position.x;
+    const float dy = at.y - camera_position.y;
+    const float dz = at.z - camera_position.z;
     return dx * dx + dy * dy + dz * dz;
   };
   std::sort(translucent.begin(), translucent.end(),
@@ -314,6 +373,11 @@ inline void draw(const World & world, const Vector3 camera_position)
   for (const Object * object : translucent) {
     shape_of(*object, Fade(object->color, object->opacity), false);
   }
+}
+
+inline void unload(const World & world)
+{
+  if (world.model_loaded) UnloadModel(world.model);
 }
 
 }   // namespace sim::world

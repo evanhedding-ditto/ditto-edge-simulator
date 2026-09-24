@@ -48,11 +48,25 @@ factory_fleet="$SIM_ROOT/build/cmake/ditto_factory_fleet"
 if [[ ! -x "$viewer" || ! -x "$telemetry_probe" || ! -x "$network_relay" ||
   ! -x "$synthetic_fleet" || ! -x "$factory_fleet" || "$SIM_ROOT/CMakeLists.txt" -nt "$viewer" ||
   "$SIM_ROOT/viewer/src/main.cpp" -nt "$viewer" || "$SIM_ROOT/network/relay.cpp" -nt "$network_relay" ||
+  "$SIM_ROOT/viewer/src/world.hpp" -nt "$viewer" ||
   "$SIM_ROOT/tools/px4_telemetry_ready.cpp" -nt "$telemetry_probe" ||
   "$SIM_ROOT/tools/synthetic_fleet.cpp" -nt "$synthetic_fleet" ||
   "$SIM_ROOT/tools/factory_fleet.cpp" -nt "$factory_fleet" ]]
 then
   "$SIM_ROOT/scripts/build/viewer.sh"
+fi
+if [[ "${SIM_VIEWER:-raylib}" == "cesium-native" ]]; then
+  cesium_viewer="$SIM_ROOT/build/cmake-cesium/ditto_fleet_viewer_cesium"
+  if [[ ! -x "$cesium_viewer" || "$SIM_ROOT/CMakeLists.txt" -nt "$cesium_viewer" ||
+    "$SIM_ROOT/viewer/src/main.cpp" -nt "$cesium_viewer" ||
+    "$SIM_ROOT/viewer/src/world.hpp" -nt "$cesium_viewer" ||
+    "$SIM_ROOT/scripts/build/cesium-native.sh" -nt "$cesium_viewer" ||
+    "$SIM_ROOT/viewer/cesium/CMakeLists.txt" -nt "$cesium_viewer" ||
+    "$SIM_ROOT/viewer/cesium/raylib_tileset.cpp" -nt "$cesium_viewer" ||
+    "$SIM_ROOT/viewer/cesium/raylib_tileset.hpp" -nt "$cesium_viewer" ||
+    "$SIM_ROOT/viewer/cesium/vcpkg-triplets/arm64-osx.cmake" -nt "$cesium_viewer" ]]; then
+    "$SIM_ROOT/scripts/build/cesium-native.sh"
+  fi
 fi
 # Always, not only when the binary is missing: cargo is incremental and a
 # stale observer is worse than a few seconds of build. Gating on existence

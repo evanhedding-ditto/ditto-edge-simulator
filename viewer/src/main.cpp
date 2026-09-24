@@ -27,6 +27,7 @@
 
 #include <raylib.h>
 #include <raymath.h>
+#include <rlgl.h>
 
 #include <ditto/observer/client.hpp>
 
@@ -35,6 +36,9 @@
 #include <nlohmann/json.hpp>
 
 #include "world.hpp"
+#ifdef DITTO_CESIUM_VIEWER
+#include "raylib_tileset.hpp"
+#endif
 
 namespace
 {
@@ -246,7 +250,7 @@ Vector3 rotate_by_px4_quaternion(const Vehicle & vehicle, const Vector3 body_vec
   const auto & q = vehicle.attitude_quaternion;
   const Quaternion attitude{q[1], q[2], q[3], q[0]};
   const Vector3 ned = Vector3RotateByQuaternion(body_vector, attitude);
-  return {ned.y, -ned.z, ned.x};
+  return sim::world::view_point(ned.y, -ned.z, ned.x);
 }
 
 void draw_drone(const Vehicle & vehicle, const Vector3 center)
@@ -683,6 +687,15 @@ int main(int argc, char ** argv)
     TraceLog(LOG_ERROR, "at least one PX4 SIH telemetry source is required");
     return 2;
   }
+#ifdef DITTO_CESIUM_VIEWER
+  const char * cesium_token = std::getenv("CESIUM_ACCESS_TOKEN");
+  const char * use_cesium_env = std::getenv("SIM_VIEWER_USE_CESIUM");
+  const bool use_cesium = use_cesium_env != nullptr && std::string(use_cesium_env) == "1";
+  if (use_cesium && (cesium_token == nullptr || *cesium_token == '\0')) {
+    TraceLog(LOG_ERROR, "Cesium scenario requires CESIUM_ACCESS_TOKEN in .env");
+    return 2;
+  }
+#endif
 
   std::mutex snapshot_mutex;
   Snapshot latest;
@@ -836,6 +849,27 @@ int main(int argc, char ** argv)
   }
   SetWindowMinSize(800, 560);
   SetTargetFPS(60);
+#ifdef DITTO_CESIUM_VIEWER
+  std::unique_ptr<sim::cesium::RaylibTileset> cesium_tiles;
+  if (use_cesium) {
+    try {
+      cesium_tiles = std::make_unique<sim::cesium::RaylibTileset>(
+        origin.latitude, origin.longitude, environment_number("SIM_VIEWER_ORIGIN_ALT").value_or(0.0),
+        environment_number("SIM_VIEWER_RADIUS_M").value_or(500.0), cesium_token);
+    } catch (const std::exception& error) {
+      TraceLog(LOG_ERROR, "could not start Cesium tiles: %s", error.what());
+      stopping.store(true);
+      {
+        std::lock_guard<std::mutex> lock(stream_mutex);
+        if (active_stream) active_stream->cancel();
+      }
+      if (observer_watcher.joinable()) observer_watcher.join();
+      poller.join();
+      CloseWindow();
+      return 1;
+    }
+  }
+#endif
   Font ui_font = LoadFontEx("/System/Library/Fonts/SFNS.ttf", 48, nullptr, 0);
   SetTextureFilter(ui_font.texture, TEXTURE_FILTER_BILINEAR);
   const auto draw_text = [&ui_font](
@@ -845,13 +879,26 @@ int main(int argc, char ** argv)
 
   // Static scenery, if the scenario names a world file. Display only; see
   // world.hpp. An absent or unreadable world leaves the ground bare.
+#ifdef DITTO_CESIUM_VIEWER
+  const sim::world::World world = sim::world::read(world_path, !use_cesium);
+#else
   const sim::world::World world = sim::world::read(world_path);
+#endif
+#ifdef DITTO_CESIUM_VIEWER
+  if (world.model_loaded || cesium_tiles) rlSetClipPlanes(1.0, 10000.0);
+#else
+  if (world.model_loaded) rlSetClipPlanes(1.0, 5000.0);
+#endif
   if (!world_path.empty()) {
     if (world.empty()) {
+#ifdef DITTO_CESIUM_VIEWER
+      if (!cesium_tiles)
+#endif
       TraceLog(LOG_WARNING, "no world objects drawn from %s", world_path.c_str());
     } else {
-      TraceLog(LOG_INFO, "world '%s': %zu objects from %s",
-        world.name.c_str(), world.objects.size(), world_path.c_str());
+      TraceLog(LOG_INFO, "world '%s': %zu objects, %d model meshes from %s",
+        world.name.c_str(), world.objects.size(), world.model_loaded ? world.model.meshCount : 0,
+        world_path.c_str());
     }
   }
 
@@ -870,7 +917,7 @@ int main(int argc, char ** argv)
   // fleet in the distance. A world with no objects falls back to the fleet-size
   // guess, which is all there is to go on.
   const sim::world::Bounds bounds = sim::world::content_bounds(world);
-  const float initial_distance = bounds.valid
+  const float initial_distance = world.view_distance_m > 0.0F ? world.view_distance_m : bounds.valid
     ? bounds.framing_span_m() * 1.15F
     : (sources.size() > 4 ? 140.0F : 48.0F);
   // The world framing above assumes these two; they live in world.hpp so the
@@ -879,7 +926,8 @@ int main(int argc, char ** argv)
   float pitch = sim::world::kDefaultPitchRad;
   float distance = initial_distance;
   Camera3D camera{};
-  const Vector3 home_target = bounds.valid ? bounds.target() : Vector3{0.0F, 3.0F, 0.0F};
+  Vector3 home_target = bounds.valid ? bounds.target() : Vector3{0.0F, 3.0F, 0.0F};
+  if (world.view_distance_m > 0.0F) home_target.y = world.view_target_height_m;
   camera.target = home_target;
   camera.up = {0.0F, 1.0F, 0.0F};
   camera.fovy = 48.0F;
@@ -1007,6 +1055,13 @@ int main(int argc, char ** argv)
       camera.target.y + std::sin(pitch) * distance,
       camera.target.z + std::cos(yaw) * std::cos(pitch) * distance,
     };
+#ifdef DITTO_CESIUM_VIEWER
+    if (cesium_tiles) {
+      // The projection spans the whole window (the sidebar only scissors it),
+      // so tile selection must see the same frustum or it culls the left edge.
+      cesium_tiles->update(camera, GetScreenWidth(), GetScreenHeight(), GetFrameTime());
+    }
+#endif
 
     Snapshot snapshot;
     {
@@ -1038,14 +1093,26 @@ int main(int argc, char ** argv)
     }
 
     BeginDrawing();
-    ClearBackground({238, 243, 247, 255});
+#ifdef DITTO_CESIUM_VIEWER
+    ClearBackground((world.model_loaded || cesium_tiles) ? Color{174, 214, 235, 255} : Color{238, 243, 247, 255});
+#else
+    ClearBackground(world.model_loaded ? Color{174, 214, 235, 255} : Color{238, 243, 247, 255});
+#endif
     BeginScissorMode(0, 0, static_cast<int>(sidebar_left), GetScreenHeight());
     BeginMode3D(camera);
-    DrawPlane({0.0F, -0.03F, 0.0F}, {map_size, map_size}, {229, 235, 240, 255});
-    DrawGrid(static_cast<int>(map_size), 1.0F);
+#ifdef DITTO_CESIUM_VIEWER
+    if (cesium_tiles) {
+      cesium_tiles->draw();
+    } else
+#endif
+    {
+    DrawPlane({0.0F, world.model_loaded ? -1.0F : -0.03F, 0.0F}, {map_size, map_size},
+      world.model_loaded ? Color{157, 161, 162, 255} : Color{229, 235, 240, 255});
+    if (!world.model_loaded) DrawGrid(static_cast<int>(map_size), 1.0F);
     sim::world::draw(world, camera.position);
+    }
     for (const auto & [id, vehicle] : visible) {
-      const Vector3 position{vehicle.east_m, -vehicle.down_m, vehicle.north_m};
+      const Vector3 position = sim::world::view_point(vehicle.east_m, -vehicle.down_m, vehicle.north_m);
       if (vehicle.ground) {
         // One full cycle is two steps, so the phase advances by the distance
         // covered divided by a stride pair. A stopped robot holds its phase
@@ -1064,7 +1131,7 @@ int main(int argc, char ** argv)
     std::unordered_map<std::string, Vector3> node_positions;
     if (net_ever_seen) {
       for (const auto & [id, vehicle] : visible) {
-        node_positions[id] = {vehicle.east_m, -vehicle.down_m, vehicle.north_m};
+        node_positions[id] = sim::world::view_point(vehicle.east_m, -vehicle.down_m, vehicle.north_m);
       }
       // Nodes with no vehicle of their own -- the operator, normally. Spread
       // them on a small ring at the origin so several never sit on one spot.
@@ -1137,6 +1204,42 @@ int main(int argc, char ** argv)
     }
     EndMode3D();
     EndScissorMode();
+
+#ifndef DITTO_CESIUM_VIEWER
+    for (const auto & landmark : world.landmarks) {
+      const Vector2 at = GetWorldToScreen(landmark.position, camera);
+      if (at.x < 0 || at.x >= sidebar_left || at.y < 100 || at.y >= GetScreenHeight() - 32) continue;
+      const float width = MeasureTextEx(ui_font, landmark.name.c_str(), 13, 0.5F).x + 16.0F;
+      const Rectangle tag{at.x - width * 0.5F, at.y - 22.0F, width, 21.0F};
+      DrawRectangleRounded(tag, 0.25F, 4, {30, 41, 59, 225});
+      draw_text(landmark.name.c_str(), tag.x + 8.0F, tag.y + 4.0F, 13, RAYWHITE);
+    }
+#endif
+    if (world.model_loaded) {
+      std::vector<std::string> ids;
+      ids.reserve(visible.size());
+      for (const auto & [id, vehicle] : visible) ids.push_back(id);
+      std::sort(ids.begin(), ids.end(), vehicle_less);
+      std::vector<Vector2> placed;
+      for (const auto & id : ids) {
+        const auto & vehicle = visible.at(id);
+        const Vector2 at = GetWorldToScreen(
+          sim::world::view_point(vehicle.east_m, -vehicle.down_m + 2.0F, vehicle.north_m), camera);
+        if (at.x < 10 || at.x >= sidebar_left - 10 || at.y < 100 || at.y >= GetScreenHeight() - 30) continue;
+        const Color color = now - vehicle.published_unix_ms > 2000 ? ORANGE : vehicle_color(id);
+        DrawCircleV(at, 7.0F, color);
+        DrawCircleLines(static_cast<int>(at.x), static_cast<int>(at.y), 10.0F, RAYWHITE);
+        const float width = MeasureTextEx(ui_font, id.c_str(), 13, 0.5F).x + 14.0F;
+        Vector2 label{std::min(at.x + 12.0F, sidebar_left - width - 4.0F), at.y - 11.0F};
+        for (const auto & prior : placed) {
+          if (std::abs(label.x - prior.x) < 80.0F && std::abs(label.y - prior.y) < 20.0F)
+            label.y += 24.0F;
+        }
+        placed.push_back(label);
+        DrawRectangleRounded({label.x, label.y, width, 20.0F}, 0.25F, 4, {30, 41, 59, 225});
+        draw_text(id.c_str(), label.x + 7.0F, label.y + 4.0F, 13, RAYWHITE);
+      }
+    }
 
     if (!selected_vehicle.empty()) {
       const auto vehicle = snapshot.vehicles.find(selected_vehicle);
@@ -1407,7 +1510,7 @@ int main(int argc, char ** argv)
         const std::string * hit = nullptr;
         float nearest = std::numeric_limits<float>::max();
         for (const auto & [id, vehicle] : visible) {
-          const Vector3 centre{vehicle.east_m, -vehicle.down_m, vehicle.north_m};
+          const Vector3 centre = sim::world::view_point(vehicle.east_m, -vehicle.down_m, vehicle.north_m);
           const RayCollision collision = GetRayCollisionSphere(ray, centre, pick_radius);
           if (collision.hit && collision.distance < nearest) {
             nearest = collision.distance;
@@ -1423,6 +1526,21 @@ int main(int argc, char ** argv)
     if (!snapshot.error.empty()) {
       draw_text(snapshot.error.c_str(), 24, static_cast<float>(GetScreenHeight() - 48), 14, MAROON);
     }
+#ifndef DITTO_CESIUM_VIEWER
+    if (!world.attribution.empty()) {
+      draw_text(world.attribution.c_str(), 24, static_cast<float>(GetScreenHeight() - 24), 12,
+        {30, 41, 59, 255});
+    }
+#endif
+#ifdef DITTO_CESIUM_VIEWER
+    if (cesium_tiles) {
+      draw_text(cesium_tiles->status().c_str(), 24, 104, 13, {30, 41, 59, 255});
+      if (!cesium_tiles->attribution().empty()) {
+        draw_text(cesium_tiles->attribution().c_str(), 24,
+          static_cast<float>(GetScreenHeight() - 24), 11, {30, 41, 59, 255});
+      }
+    }
+#endif
     EndDrawing();
 
     // Capture once there is something to look at. This used to wait on the
@@ -1430,7 +1548,17 @@ int main(int argc, char ** argv)
     // most wanted for: checking a world file, and checking a fleet, neither of
     // which needs a mesh to be up. A network run still settles on the same
     // condition it always did, because net_ever_seen trips first.
-    if (capture_path != nullptr && !captured && (net_ever_seen || !visible.empty()) &&
+#ifdef DITTO_CESIUM_VIEWER
+    // Tiles stream in over seconds, so a Cesium capture waits for this view's.
+    const bool scenery_settled = !cesium_tiles || cesium_tiles->idle();
+#else
+    const bool scenery_settled = true;
+#endif
+    if (capture_path != nullptr && !captured && (net_ever_seen || !visible.empty() || !world.empty()
+#ifdef DITTO_CESIUM_VIEWER
+      || cesium_tiles
+#endif
+      ) && scenery_settled &&
       ++settle_frames > 90)
     {
       TakeScreenshot(capture_path);
@@ -1449,6 +1577,7 @@ int main(int argc, char ** argv)
   }
   if (observer_watcher.joinable()) observer_watcher.join();
   poller.join();
+  sim::world::unload(world);
   UnloadFont(ui_font);
   CloseWindow();
   return 0;

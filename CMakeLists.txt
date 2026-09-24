@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(ditto_edge_simulator LANGUAGES CXX)
 
+option(DITTO_ENABLE_CESIUM_NATIVE "Build the opt-in Cesium Native map viewer" OFF)
+
 set(DITTO_EDGE_ADAPTERS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../Ditto-Edge-Server/ditto-edge-adapters" CACHE PATH
   "Ditto Edge Adapters checkout")
 set(PX4_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../PX4-Autopilot" CACHE PATH "PX4 checkout")
@@ -33,6 +35,10 @@ target_compile_options(ditto_fleet_viewer PRIVATE -Wall -Wextra -Wpedantic -Wno-
 target_include_directories(ditto_fleet_viewer PRIVATE "${PX4_ROOT}/build/px4_sitl_sih")
 target_link_libraries(ditto_fleet_viewer PRIVATE
   raylib nlohmann_json::nlohmann_json DittoObserver::Client)
+
+if(DITTO_ENABLE_CESIUM_NATIVE)
+  add_subdirectory(viewer/cesium)
+endif()
 
 add_executable(ditto_px4_telemetry_ready tools/px4_telemetry_ready.cpp)
 target_compile_features(ditto_px4_telemetry_ready PRIVATE cxx_std_17)
