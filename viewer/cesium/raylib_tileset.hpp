@@ -2,6 +2,7 @@
 
 #include <raylib.h>
 
+#include <cstddef>
 #include <memory>
 #include <string>
 
@@ -15,9 +16,11 @@ public:
   RaylibTileset(const RaylibTileset&) = delete;
   RaylibTileset& operator=(const RaylibTileset&) = delete;
 
-  void update(const Camera3D& camera, int width, int height, float delta_seconds);
-  void draw() const;
-  /// True once the tiles this view wants have all loaded.
+  /// Selects tiles for one view. View 0 is the window; each other view -- a
+  /// vehicle camera -- keeps its own selection, drawn with draw(view).
+  void update(const Camera3D& camera, int width, int height, float delta_seconds, std::size_t view = 0);
+  void draw(std::size_t view = 0) const;
+  /// True once the tiles the window's view wants have all loaded.
   bool idle() const noexcept;
   const std::string& status() const noexcept;
   const std::string& attribution() const noexcept;

@@ -29,12 +29,16 @@ endif()
 add_subdirectory("${DITTO_EDGE_ADAPTERS_ROOT}/sdk/cpp" ditto_edge_client)
 add_subdirectory("${DITTO_EDGE_ADAPTERS_ROOT}/observer/sdk/cpp" ditto_observer_client)
 
-add_executable(ditto_fleet_viewer viewer/src/main.cpp)
+# Vehicle camera feeds (viewer/src/video.cpp): GL readback, hardware H.264.
+set(DITTO_VIDEO_FRAMEWORKS "-framework OpenGL" "-framework VideoToolbox" "-framework CoreMedia"
+  "-framework CoreVideo" "-framework CoreFoundation" "-framework Foundation" objc)
+
+add_executable(ditto_fleet_viewer viewer/src/main.cpp viewer/src/video.cpp)
 target_compile_features(ditto_fleet_viewer PRIVATE cxx_std_17)
 target_compile_options(ditto_fleet_viewer PRIVATE -Wall -Wextra -Wpedantic -Wno-missing-field-initializers)
 target_include_directories(ditto_fleet_viewer PRIVATE "${PX4_ROOT}/build/px4_sitl_sih")
 target_link_libraries(ditto_fleet_viewer PRIVATE
-  raylib nlohmann_json::nlohmann_json DittoObserver::Client)
+  raylib nlohmann_json::nlohmann_json DittoObserver::Client ${DITTO_VIDEO_FRAMEWORKS})
 
 if(DITTO_ENABLE_CESIUM_NATIVE)
   add_subdirectory(viewer/cesium)
@@ -44,6 +48,11 @@ add_executable(ditto_px4_telemetry_ready tools/px4_telemetry_ready.cpp)
 target_compile_features(ditto_px4_telemetry_ready PRIVATE cxx_std_17)
 target_compile_options(ditto_px4_telemetry_ready PRIVATE -Wall -Wextra -Wpedantic -Wno-missing-field-initializers)
 target_include_directories(ditto_px4_telemetry_ready PRIVATE "${PX4_ROOT}/build/px4_sitl_sih")
+
+# Ground stations on the LAN reach each PX4's GCS link through this.
+add_executable(ditto_gcs_relay tools/gcs_relay.cpp)
+target_compile_features(ditto_gcs_relay PRIVATE cxx_std_17)
+target_compile_options(ditto_gcs_relay PRIVATE -Wall -Wextra -Wpedantic)
 
 add_executable(ditto_network_relay network/relay.cpp)
 target_compile_features(ditto_network_relay PRIVATE cxx_std_17)

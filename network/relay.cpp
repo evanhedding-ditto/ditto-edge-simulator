@@ -83,13 +83,13 @@ struct Arguments {
   std::exit(2);
 }
 
-int integer(const char * text)
+int integer(const char * text, const long minimum = 1)
 {
   char * end = nullptr;
   errno = 0;
   const auto value = std::strtol(text, &end, 10);
-  if (end == text || *end != '\0' || errno == ERANGE || value <= 0 || value > std::numeric_limits<int>::max()) {
-    throw std::invalid_argument("expected a positive integer");
+  if (end == text || *end != '\0' || errno == ERANGE || value < minimum || value > std::numeric_limits<int>::max()) {
+    throw std::invalid_argument("expected an integer of at least " + std::to_string(minimum));
   }
   return static_cast<int>(value);
 }
@@ -101,13 +101,15 @@ Arguments arguments(const int argc, char ** argv)
   for (int index = 1; index < argc; index += 2) {
     const std::string_view option(argv[index]);
     if (option == "--vehicles") result.vehicles = integer(argv[index + 1]);
-    else if (option == "--mesh-peers") result.mesh_peers = integer(argv[index + 1]);
+    else if (option == "--mesh-peers") result.mesh_peers = integer(argv[index + 1], 0);
     else if (option == "--operator-peers") result.operator_peers = integer(argv[index + 1]);
     else if (option == "--capacity-kbps") result.capacity_bps = static_cast<std::uint64_t>(integer(argv[index + 1])) * 1000;
     else if (option == "--metrics") result.metrics = argv[index + 1];
     else usage(argv[0]);
   }
-  if (result.vehicles < 2 || result.mesh_peers >= result.vehicles || result.operator_peers > result.vehicles ||
+  // A lone vehicle has no vehicle peers; in a fleet every vehicle has one.
+  if (result.mesh_peers >= result.vehicles || (result.mesh_peers == 0 && result.vehicles > 1) ||
+    result.operator_peers > result.vehicles ||
     result.capacity_bps == 0 || result.metrics.empty()) usage(argv[0]);
   const auto max_port = static_cast<std::uint32_t>(kRelayPortBase) +
     static_cast<std::uint32_t>(result.vehicles) * static_cast<std::uint32_t>(result.vehicles + 1) + result.vehicles - 1;

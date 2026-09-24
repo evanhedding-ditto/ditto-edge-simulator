@@ -19,13 +19,14 @@ wait_for_fleet_xrce_listeners
 stagger_px4_boot "$index"
 px4_phase "px4_$index" barriers
 rootfs="$(node_dir "px4_$index")/rootfs"
-if [[ ! -f "$rootfs/.ditto-viewer-profile-v21" ]]; then
+if [[ ! -f "$rootfs/.ditto-viewer-profile-v22" ]]; then
   [[ ! -e "$rootfs/etc" ]] || die "stale PX4 rootfs; restart the simulator"
   mkdir -p "$rootfs"
   cp -cR "$source_data" "$rootfs/etc"
   mavlink="$rootfs/etc/init.d-posix/px4-rc.mavlink"
   # The ROS 2 vehicles need no MAVLink control link; MAVLink vehicles need one.
-  # Camera, gimbal, and GCS links are unused in this simulator.
+  # Camera and gimbal links are unused in this simulator, and PX4's own GCS link
+  # is replaced by one that answers only scripts/process/gcs-relay.sh.
   sed -i '' '/# GCS link/,/# API\/Offboard link/{ /# API\/Offboard link/!d; }' "$mavlink"
   sed -i '' '/# API\/Offboard link/d' "$mavlink"
   sed -i '' '/mavlink start -x -u $udp_offboard_port_local/d' "$mavlink"
@@ -38,6 +39,9 @@ if [[ ! -f "$rootfs/.ditto-viewer-profile-v21" ]]; then
   sed -i '' '/mavlink start -x -u $udp_sihsim_port_local/a\
 if [ "$PX4_DITTO_MAVLINK" = "1" ]; then\
 mavlink start -x -u $udp_offboard_port_local -r 100000 -f -m onboard -o $udp_offboard_port_remote\
+fi\
+if [ -n "$PX4_DITTO_GCS_PORT" ]; then\
+mavlink start -x -u $udp_gcs_port_local -r 40000 -o $PX4_DITTO_GCS_PORT\
 fi\
 true' "$mavlink"
   sed -i '' '/HIL_ACTUATOR_CONTROLS/d' "$mavlink"
@@ -59,11 +63,15 @@ true' "$mavlink"
   # "create entities failed: participant: 255" and no recovery path.
   sed -i '' 's/^uxrce_dds_client start -t udp -p \$uxrce_dds_port \$uxrce_dds_ns$/[ "$PX4_DITTO_UXRCE" = "1" ] \&\& { param set UXRCE_DDS_PTCFG 1; uxrce_dds_client start -t udp -p $uxrce_dds_port $uxrce_dds_ns; }/' "$rootfs/etc/init.d-posix/rcS"
   grep -qF 'param set UXRCE_DDS_PTCFG 1; uxrce_dds_client start' "$rootfs/etc/init.d-posix/rcS" || die "could not gate PX4 XRCE startup"
-  touch "$rootfs/.ditto-viewer-profile-v21"
+  touch "$rootfs/.ditto-viewer-profile-v22"
 fi
 data="$rootfs/etc"
 export ROS_DOMAIN_ID="$index"
 export PX4_DITTO_MAVLINK=0 PX4_DITTO_UXRCE=1
+# A LAN ground station's link: PX4 talks to the relay's fixed loopback port,
+# the relay to the station over TCP. See tools/gcs_relay.cpp.
+export PX4_DITTO_GCS_PORT=
+[[ -z "${SIM_GCS_TCP_PORT:-}" ]] || PX4_DITTO_GCS_PORT="$((SIM_GCS_TCP_PORT + index))"
 if [[ "$is_mavlink" == true ]]; then
   PX4_DITTO_MAVLINK=1
   PX4_DITTO_UXRCE=0

@@ -35,6 +35,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "video.hpp"
 #include "world.hpp"
 #ifdef DITTO_CESIUM_VIEWER
 #include "raylib_tileset.hpp"
@@ -251,6 +252,26 @@ Vector3 rotate_by_px4_quaternion(const Vehicle & vehicle, const Vector3 body_vec
   const Quaternion attitude{q[1], q[2], q[3], q[0]};
   const Vector3 ned = Vector3RotateByQuaternion(body_vector, attitude);
   return sim::world::view_point(ned.y, -ned.z, ned.x);
+}
+
+/// What a vehicle's video feed sees: from the lens draw_drone puts on the nose,
+/// but on a gimbal -- level, turning with the heading, 30 degrees down -- as a
+/// real drone's camera is, so the horizon holds still while the airframe tilts.
+Camera3D nose_camera(const Vehicle & vehicle)
+{
+  const Vector3 forward = rotate_by_px4_quaternion(vehicle, {1.0F, 0.0F, 0.0F});
+  const Vector3 up = Vector3Negate(rotate_by_px4_quaternion(vehicle, {0.0F, 0.0F, 1.0F}));
+  const Vector3 lens = Vector3Add(sim::world::view_point(vehicle.east_m, -vehicle.down_m, vehicle.north_m),
+    Vector3Add(Vector3Scale(forward, 0.27F), Vector3Scale(up, 0.16F)));
+  const float heading = std::atan2(forward.x, forward.z);
+  constexpr float tilt = 30.0F * DEG2RAD;
+  Camera3D camera{};
+  camera.position = lens;
+  camera.target = Vector3Add(lens, {std::sin(heading) * std::cos(tilt), -std::sin(tilt), std::cos(heading) * std::cos(tilt)});
+  camera.up = {0.0F, 1.0F, 0.0F};
+  camera.fovy = 48.0F;  // vertical; 77 degrees across at 16:9, a typical drone camera
+  camera.projection = CAMERA_PERSPECTIVE;
+  return camera;
 }
 
 /// A quadcopter in the X configuration: hub and top shell, four arms, motor
@@ -678,8 +699,16 @@ int main(int argc, char ** argv)
   std::string network_metrics;
   std::string observer_endpoint;
   std::string world_path;
+  std::uint16_t rtsp_port = 0;
   try {
     for (int index = 1; index < argc; ++index) {
+      if (std::string(argv[index]) == "--rtsp") {
+        if (++index == argc) throw std::invalid_argument("RTSP port is required");
+        const auto port = std::stoul(argv[index]);
+        if (port == 0 || port > 65534) throw std::invalid_argument("RTSP port out of range");
+        rtsp_port = static_cast<std::uint16_t>(port);
+        continue;
+      }
       if (std::string(argv[index]) == "--world") {
         if (++index == argc) throw std::invalid_argument("world file path is required");
         world_path = argv[index];
@@ -697,7 +726,7 @@ int main(int argc, char ** argv)
       }
       if (std::string(argv[index]) != "--vehicle" || ++index == argc) {
         TraceLog(LOG_ERROR,
-          "usage: %s [--network-metrics PATH] [--observer ADDR] [--world PATH]"
+          "usage: %s [--network-metrics PATH] [--observer ADDR] [--world PATH] [--rtsp PORT]"
           " --vehicle ID --port PX4_SIH_PORT [...]",
           argv[0]);
         return 2;
@@ -705,7 +734,7 @@ int main(int argc, char ** argv)
       std::string vehicle_id(argv[index]);
       if (++index == argc || std::string(argv[index]) != "--port" || ++index == argc) {
         TraceLog(LOG_ERROR,
-          "usage: %s [--network-metrics PATH] [--observer ADDR] [--world PATH]"
+          "usage: %s [--network-metrics PATH] [--observer ADDR] [--world PATH] [--rtsp PORT]"
           " --vehicle ID --port PX4_SIH_PORT [...]",
           argv[0]);
         return 2;
@@ -731,6 +760,10 @@ int main(int argc, char ** argv)
     return 2;
   }
 #endif
+
+  // Taken before the poller starts writing to `sources`.
+  std::vector<std::string> vehicle_ids;
+  for (const auto & source : sources) vehicle_ids.push_back(source.vehicle.id);
 
   std::mutex snapshot_mutex;
   Snapshot latest;
@@ -905,6 +938,16 @@ int main(int argc, char ** argv)
     }
   }
 #endif
+  // Each vehicle's camera, as RTSP for a ground station. Optional, and a feed
+  // that cannot start leaves the viewer running without one.
+  std::unique_ptr<sim::video::Feeds> feeds;
+  if (rtsp_port != 0) {
+    try {
+      feeds = std::make_unique<sim::video::Feeds>(rtsp_port, vehicle_ids);
+    } catch (const std::exception & error) {
+      TraceLog(LOG_ERROR, "no camera feeds: %s", error.what());
+    }
+  }
   Font ui_font = LoadFontEx("/System/Library/Fonts/SFNS.ttf", 48, nullptr, 0);
   SetTextureFilter(ui_font.texture, TEXTURE_FILTER_BILINEAR);
   const auto draw_text = [&ui_font](
@@ -1005,6 +1048,22 @@ int main(int argc, char ** argv)
   const char * capture_path = std::getenv("SIM_VIEWER_CAPTURE");
   bool captured = false;
   int settle_frames = 0;
+
+  const Color sky = city_map ? Color{174, 214, 235, 255} : Color{238, 243, 247, 255};
+  // Scenery as seen from `eye`, for the window (view 0) or a vehicle camera.
+  const auto draw_scenery = [&](const std::size_t view, const Vector3 eye) {
+#ifdef DITTO_CESIUM_VIEWER
+    if (cesium_tiles) {
+      cesium_tiles->draw(view);
+      return;
+    }
+#endif
+    (void)view;
+    DrawPlane({0.0F, world.model_loaded ? -1.0F : -0.03F, 0.0F}, {map_size, map_size},
+      world.model_loaded ? Color{157, 161, 162, 255} : Color{229, 235, 240, 255});
+    if (!world.model_loaded) DrawGrid(static_cast<int>(map_size), 1.0F);
+    sim::world::draw(world, eye);
+  };
 
   while (!shutdown_requested && !WindowShouldClose()) {
     // Built once per frame, after `net` settles: the link lines and the legend
@@ -1166,23 +1225,46 @@ int main(int argc, char ** argv)
       cesium_tiles->update(camera, GetScreenWidth(), GetScreenHeight(), GetFrameTime());
     }
 #endif
+    const float prop_degrees = static_cast<float>(std::fmod(GetTime() * 3.5, 1.0) * 360.0);
+
+    // Vehicle cameras, each drawn only while a ground station is watching it.
+    for (std::size_t index = 0; feeds && index < feeds->size(); ++index) {
+      const auto own = visible.find(feeds->name(index));
+      if (own == visible.end() || !feeds->due(index, render_time)) continue;
+      const Camera3D eye = nose_camera(own->second);
+#ifdef DITTO_CESIUM_VIEWER
+      if (cesium_tiles) cesium_tiles->update(eye, sim::video::Feeds::kWidth, sim::video::Feeds::kHeight, GetFrameTime(), index + 1);
+#endif
+      feeds->begin(index);
+      ClearBackground(sky);
+      BeginMode3D(eye);
+      draw_scenery(index + 1, eye.position);
+      for (const auto & [id, vehicle] : visible) {
+        if (id == own->first) continue;
+        const Vector3 position = sim::world::view_point(vehicle.east_m, -vehicle.down_m, vehicle.north_m);
+        if (!vehicle.ground) draw_drone(vehicle, position, prop_degrees, eye.position);
+        else if (const auto phase = gait_phase.find(id); phase != gait_phase.end()) draw_robot(vehicle, position, phase->second);
+      }
+      EndMode3D();
+#ifdef DITTO_CESIUM_VIEWER
+      // The tiles' licence wants their credit wherever they are shown, and on
+      // a shaded strip, since the ground behind it is often white concrete.
+      if (cesium_tiles && !cesium_tiles->attribution().empty()) {
+        const char * credit = cesium_tiles->attribution().c_str();
+        constexpr int strip = 26;
+        DrawRectangle(0, sim::video::Feeds::kHeight - strip,
+          static_cast<int>(MeasureTextEx(ui_font, credit, 14, 0.5F).x) + 24, strip, Fade(BLACK, 0.45F));
+        draw_text(credit, 12, static_cast<float>(sim::video::Feeds::kHeight - strip + 6), 14, RAYWHITE);
+      }
+#endif
+      feeds->end(index, render_time);
+    }
 
     BeginDrawing();
-    ClearBackground(city_map ? Color{174, 214, 235, 255} : Color{238, 243, 247, 255});
+    ClearBackground(sky);
     BeginScissorMode(0, 0, static_cast<int>(sidebar_left), GetScreenHeight());
     BeginMode3D(camera);
-#ifdef DITTO_CESIUM_VIEWER
-    if (cesium_tiles) {
-      cesium_tiles->draw();
-    } else
-#endif
-    {
-    DrawPlane({0.0F, world.model_loaded ? -1.0F : -0.03F, 0.0F}, {map_size, map_size},
-      world.model_loaded ? Color{157, 161, 162, 255} : Color{229, 235, 240, 255});
-    if (!world.model_loaded) DrawGrid(static_cast<int>(map_size), 1.0F);
-    sim::world::draw(world, camera.position);
-    }
-    const float prop_degrees = static_cast<float>(std::fmod(GetTime() * 3.5, 1.0) * 360.0);
+    draw_scenery(0, camera.position);
     for (const auto & [id, vehicle] : visible) {
       const Vector3 position = sim::world::view_point(vehicle.east_m, -vehicle.down_m, vehicle.north_m);
       if (vehicle.ground) {
@@ -1654,6 +1736,7 @@ int main(int argc, char ** argv)
   }
   if (observer_watcher.joinable()) observer_watcher.join();
   poller.join();
+  feeds.reset();  // its GL resources need the window
   sim::world::unload(world);
   UnloadFont(ui_font);
   CloseWindow();

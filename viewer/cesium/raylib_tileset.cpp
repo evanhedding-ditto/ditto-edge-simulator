@@ -9,6 +9,7 @@
 #include <Cesium3DTilesSelection/Tileset.h>
 #include <Cesium3DTilesSelection/TilesetExternals.h>
 #include <Cesium3DTilesSelection/TilesetOptions.h>
+#include <Cesium3DTilesSelection/TilesetViewGroup.h>
 #include <Cesium3DTilesSelection/ViewState.h>
 #include <CesiumAsync/AsyncSystem.h>
 #include <CesiumAsync/ITaskProcessor.h>
@@ -37,6 +38,7 @@
 #include <mutex>
 #include <sstream>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -383,12 +385,15 @@ struct RaylibTileset::Impl {
   std::unique_ptr<Cesium3DTilesSelection::Tileset> tileset;
   glm::dvec3 origin{}, east{}, south{}, up{};
   glm::dmat4 ecefToLocal{1.0};
-  std::vector<Cesium3DTilesSelection::Tile::ConstPointer> visible;
+  // After `tileset`, which must outlive both. The window uses the tileset's
+  // default group; `cameras` holds one group per extra view, by view number.
+  std::unordered_map<std::size_t, Cesium3DTilesSelection::TilesetViewGroup> cameras;
+  std::vector<std::vector<Cesium3DTilesSelection::Tile::ConstPointer>> visible;  // by view number
   std::string load_status{"Loading Cesium tiles…"};
   float load_progress = 0.0F;
   std::string credit_text;
 
-  void update(const Camera3D& camera, int width, int height, float delta) {
+  void update(const Camera3D& camera, int width, int height, float delta, std::size_t view_index) {
     const glm::dvec3 local_position(camera.position.x, camera.position.y + ground_offset, camera.position.z);
     const glm::dvec3 local_direction(camera.target.x - camera.position.x,
         camera.target.y - camera.position.y, camera.target.z - camera.position.z);
@@ -400,10 +405,13 @@ struct RaylibTileset::Impl {
     const Cesium3DTilesSelection::ViewState view(position, direction, view_up,
         glm::dvec2(width, height), hfov, vfov, CesiumGeospatial::Ellipsoid::WGS84);
     async.dispatchMainThreadTasks();
-    const auto& result = tileset->updateViewGroup(tileset->getDefaultViewGroup(), {view}, delta);
+    auto& group = view_index == 0 ? tileset->getDefaultViewGroup() : cameras[view_index];
+    const auto& result = tileset->updateViewGroup(group, {view}, delta);
     async.dispatchMainThreadTasks();
     tileset->loadTiles();
-    visible = result.tilesToRenderThisFrame;
+    if (visible.size() <= view_index) visible.resize(view_index + 1);
+    visible[view_index] = result.tilesToRenderThisFrame;
+    if (view_index != 0) return;
     const auto& snapshot = credits->getSnapshot();
     credit_text.clear();
     for (const auto& credit : snapshot.currentCredits) {
@@ -421,9 +429,10 @@ struct RaylibTileset::Impl {
     load_status = status.str();
   }
 
-  void draw() const {
+  void draw(std::size_t view_index) const {
+    if (view_index >= visible.size()) return;
     const Matrix to_ground = MatrixTranslate(0.0F, static_cast<float>(-ground_offset), 0.0F);
-    for (const auto& tile : visible) {
+    for (const auto& tile : visible[view_index]) {
       const auto* content = tile->getContent().getRenderContent();
       if (!content) continue;
       const auto* render = static_cast<const RenderTile*>(content->getRenderResources());
@@ -437,12 +446,12 @@ RaylibTileset::RaylibTileset(double latitude, double longitude, double altitude,
     double radius, std::string token)
     : _impl(std::make_unique<Impl>(latitude, longitude, altitude, radius, token)) {}
 RaylibTileset::~RaylibTileset() = default;
-void RaylibTileset::update(const Camera3D& camera, int width, int height, float delta) {
-  _impl->update(camera, width, height, delta);
+void RaylibTileset::update(const Camera3D& camera, int width, int height, float delta, std::size_t view) {
+  _impl->update(camera, width, height, delta, view);
 }
-void RaylibTileset::draw() const { _impl->draw(); }
+void RaylibTileset::draw(std::size_t view) const { _impl->draw(view); }
 bool RaylibTileset::idle() const noexcept {
-  return _impl->load_progress >= 100.0F && !_impl->visible.empty();
+  return _impl->load_progress >= 100.0F && !_impl->visible.empty() && !_impl->visible[0].empty();
 }
 const std::string& RaylibTileset::status() const noexcept { return _impl->load_status; }
 const std::string& RaylibTileset::attribution() const noexcept { return _impl->credit_text; }

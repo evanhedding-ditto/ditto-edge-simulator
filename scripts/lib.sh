@@ -471,7 +471,7 @@ wait_for_mesh_links() {
   local metrics="$SIM_RUNTIME_DIR/network-metrics.json"
   # Same defaults as session/render-fleet.sh and process/network.sh, which build the topology
   # this counts. Without them `set -u` aborts on the scenarios that omit both.
-  local peers="${SIM_MESH_PEERS_PER_VEHICLE:-1}" operator_peers="${SIM_OPERATOR_MESH_PEERS:-1}"
+  local peers="${SIM_MESH_PEERS_PER_VEHICLE:-$((SIM_VEHICLE_COUNT > 1))}" operator_peers="${SIM_OPERATOR_MESH_PEERS:-1}"
   local expected="$((SIM_VEHICLE_COUNT * peers + operator_peers))"
   local deadline="$((SECONDS + timeout))" count=0 observed=0 previous=-1 next_status=0
   while :; do

@@ -101,6 +101,7 @@ Only one scenario at a time. Starting a second while the first is up is refused.
 | --- | --- | --- |
 | `mvp-two-px4` | 2 PX4 | the default, and the smallest thing that proves the whole path |
 | `park-mgm-two-px4` | 2 PX4 | the same stack over a 1 km display-only map around Park MGM |
+| `park-mgm-cesium` | 1 PX4 | Park MGM in Cesium photorealistic tiles, flown and watched from a phone |
 | `mvp-four-mixed` | 4 PX4 | two ROS 2 adapters, two native MAVLink adapters |
 | `mvp-twenty-mixed` | 20 PX4 | ten of each adapter; the real-stack ceiling on one machine |
 | `synthetic-twenty` | 20 synthetic | same shape as the above, without PX4 itself |
@@ -289,6 +290,29 @@ while you are breaking the Ditto path on purpose.
 It pins its horizontal origin to the configured PX4 home position and widens the
 map past four vehicles, so restarting it mid-flight does not shift the fleet.
 
+## Flying from a phone
+
+`pixi run sim park-mgm-cesium` opens its PX4 to a ground station on the same
+Wi-Fi, such as UAS Tool. For vehicle *i*:
+
+- MAVLink: TCP to this Mac's IP, port `5760 + i` (`SIM_GCS_TCP_PORT`)
+- video: `rtsp://<this Mac's IP>:8554/px4_<i>` (`SIM_RTSP_PORT`), H.264
+  Constrained Baseline, 1280x720 at 30 fps, over UDP or TCP
+
+The MAVLink port is `tools/gcs_relay.cpp`, which bridges each connection to
+PX4's GCS link on loopback. PX4's UDP links latch onto the first sender for good,
+so a phone reconnecting from a new port would never be answered directly. The
+video is the drone's nose camera on a level gimbal, 30 degrees down, which the
+viewer renders only while someone watches and encodes in hardware
+(`viewer/src/video.cpp`); closing the viewer ends it. While the viewer serves
+video, macOS neither naps it nor lets the Mac idle-sleep. Ditto keeps its own
+control path, and whichever of Ditto or the phone commanded last is in charge.
+
+macOS's firewall has to allow `ditto_gcs_relay` and `ditto_fleet_viewer_cesium`
+to accept incoming connections. It asks the first time, and again after a
+rebuild. Neither port asks for credentials: anyone on the network can fly the
+drone and watch its camera.
+
 ## Layout
 
 ```text
@@ -303,7 +327,7 @@ scripts/demo/      canned fleet orders
 network/     the capacity relay
 viewer/      the raylib view
 worlds/      static scenery, drawn by the viewer and read by nothing else
-tools/       command client, telemetry probe, synthetic fleet
+tools/       command client, telemetry probe, synthetic fleet, GCS relay
 bin/         drop prebuilt binaries here; gitignored
 patches/     local fixes to external sources, applied at build time
 deps/        gitignored: fetched sources -- PX4, px4_msgs, the XRCE agent

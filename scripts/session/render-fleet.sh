@@ -5,7 +5,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 sim_init
 load_ditto_credentials
 
-: "${SIM_PROCESS_TEMPLATE:=config/process-compose.yaml.in}"
+: "${SIM_PROCESS_TEMPLATE:=config/process-compose.yaml.sh}"
 [[ "$SIM_VEHICLE_COUNT" =~ ^[1-9][0-9]*$ ]] || die "SIM_VEHICLE_COUNT must be positive"
 # The Big Peer link is opt-in. With it enabled every node reaches every other
 # node in two hops through the cloud, which makes SIM_MESH_PEERS_PER_VEHICLE and
@@ -19,11 +19,13 @@ else
   SIM_KNOWN_WS_SERVERS='[]'
 fi
 export SIM_KNOWN_WS_SERVERS
-SIM_MESH_PEERS_PER_VEHICLE="${SIM_MESH_PEERS_PER_VEHICLE:-1}"
+# A lone vehicle has no other vehicle to peer with; its only link is the operator.
+SIM_MESH_PEERS_PER_VEHICLE="${SIM_MESH_PEERS_PER_VEHICLE:-$((SIM_VEHICLE_COUNT > 1))}"
 SIM_OPERATOR_MESH_PEERS="${SIM_OPERATOR_MESH_PEERS:-1}"
-[[ "$SIM_MESH_PEERS_PER_VEHICLE" =~ ^[1-9][0-9]*$ ]] || die "SIM_MESH_PEERS_PER_VEHICLE must be positive"
+[[ "$SIM_MESH_PEERS_PER_VEHICLE" =~ ^[0-9]+$ ]] || die "SIM_MESH_PEERS_PER_VEHICLE must be a number"
 [[ "$SIM_OPERATOR_MESH_PEERS" =~ ^[1-9][0-9]*$ ]] || die "SIM_OPERATOR_MESH_PEERS must be positive"
 (( SIM_MESH_PEERS_PER_VEHICLE < SIM_VEHICLE_COUNT )) || die "SIM_MESH_PEERS_PER_VEHICLE must be less than SIM_VEHICLE_COUNT"
+(( SIM_MESH_PEERS_PER_VEHICLE > 0 || SIM_VEHICLE_COUNT == 1 )) || die "SIM_MESH_PEERS_PER_VEHICLE must be positive in a fleet"
 (( SIM_OPERATOR_MESH_PEERS <= SIM_VEHICLE_COUNT )) || die "SIM_OPERATOR_MESH_PEERS must not exceed SIM_VEHICLE_COUNT"
 if [[ "$SIM_PROCESS_TEMPLATE" == *.sh ]]; then
   [[ -x "$SIM_ROOT/$SIM_PROCESS_TEMPLATE" ]] || die "process template generator is not executable: $SIM_PROCESS_TEMPLATE"
@@ -87,7 +89,7 @@ if [[ "$SIM_PROCESS_TEMPLATE" == *.sh ]]; then
   # sim_init sources the scenario but exports only the path variables, so the
   # generator is a child process that would otherwise see no fleet size.
   SIM_VEHICLE_COUNT="$SIM_VEHICLE_COUNT" SIM_MAVLINK_VEHICLES="${SIM_MAVLINK_VEHICLES:-}" \
-    "$SIM_ROOT/$SIM_PROCESS_TEMPLATE" > "$template"
+    SIM_GCS_TCP_PORT="${SIM_GCS_TCP_PORT:-}" "$SIM_ROOT/$SIM_PROCESS_TEMPLATE" > "$template"
 fi
 envsubst < "$template" > "$SIM_RUNTIME_DIR/process-compose.yaml"
 printf '%s\n' "$SIM_RUNTIME_DIR"

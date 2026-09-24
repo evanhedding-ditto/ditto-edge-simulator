@@ -36,6 +36,7 @@ add_library(Ditto::CesiumNative ALIAS ditto_cesium_native)
 
 add_executable(ditto_fleet_viewer_cesium
   ../src/main.cpp
+  ../src/video.cpp
   raylib_tileset.cpp)
 set_target_properties(ditto_fleet_viewer_cesium PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
@@ -47,4 +48,4 @@ target_include_directories(ditto_fleet_viewer_cesium PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(ditto_fleet_viewer_cesium PRIVATE
   raylib nlohmann_json::nlohmann_json DittoObserver::Client
-  Ditto::CesiumNative CesiumCurl ${_cesium_absl_archives})
+  Ditto::CesiumNative CesiumCurl ${_cesium_absl_archives} ${DITTO_VIDEO_FRAMEWORKS})

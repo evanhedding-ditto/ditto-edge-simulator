@@ -34,6 +34,8 @@ if [[ -n "${SIM_WORLD_FILE:-}" ]]; then
   arguments+=(--world "$world_file")
 fi
 arguments+=(--network-metrics "$SIM_RUNTIME_DIR/network-metrics.json")
+# Each vehicle's camera as RTSP for a ground station: rtsp://<host>:PORT/px4_<index>.
+[[ -z "${SIM_RTSP_PORT:-}" ]] || arguments+=(--rtsp "$SIM_RTSP_PORT")
 # The network observer. Harmless when it is not running: the viewer reports
 # CONNECTING and draws no overlay.
 arguments+=(--observer "$SIM_OBSERVER_ADDR")

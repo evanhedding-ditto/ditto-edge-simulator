@@ -42,13 +42,15 @@ telemetry_probe="$SIM_ROOT/build/cmake/ditto_px4_telemetry_ready"
 network_relay="$SIM_ROOT/build/cmake/ditto_network_relay"
 synthetic_fleet="$SIM_ROOT/build/cmake/ditto_synthetic_fleet"
 factory_fleet="$SIM_ROOT/build/cmake/ditto_factory_fleet"
+gcs_relay="$SIM_ROOT/build/cmake/ditto_gcs_relay"
 # Every source listed here is one whose staleness has bitten before: a binary
 # that exists but predates its source is silently wrong, and nothing downstream
 # says so.
 if [[ ! -x "$viewer" || ! -x "$telemetry_probe" || ! -x "$network_relay" ||
-  ! -x "$synthetic_fleet" || ! -x "$factory_fleet" || "$SIM_ROOT/CMakeLists.txt" -nt "$viewer" ||
+  ! -x "$synthetic_fleet" || ! -x "$factory_fleet" || ! -x "$gcs_relay" || "$SIM_ROOT/CMakeLists.txt" -nt "$viewer" ||
   "$SIM_ROOT/viewer/src/main.cpp" -nt "$viewer" || "$SIM_ROOT/network/relay.cpp" -nt "$network_relay" ||
-  "$SIM_ROOT/viewer/src/world.hpp" -nt "$viewer" ||
+  "$SIM_ROOT/viewer/src/world.hpp" -nt "$viewer" || "$SIM_ROOT/viewer/src/video.cpp" -nt "$viewer" ||
+  "$SIM_ROOT/viewer/src/video.hpp" -nt "$viewer" || "$SIM_ROOT/tools/gcs_relay.cpp" -nt "$gcs_relay" ||
   "$SIM_ROOT/tools/px4_telemetry_ready.cpp" -nt "$telemetry_probe" ||
   "$SIM_ROOT/tools/synthetic_fleet.cpp" -nt "$synthetic_fleet" ||
   "$SIM_ROOT/tools/factory_fleet.cpp" -nt "$factory_fleet" ]]
@@ -60,6 +62,8 @@ if [[ "${SIM_VIEWER:-raylib}" == "cesium-native" ]]; then
   if [[ ! -x "$cesium_viewer" || "$SIM_ROOT/CMakeLists.txt" -nt "$cesium_viewer" ||
     "$SIM_ROOT/viewer/src/main.cpp" -nt "$cesium_viewer" ||
     "$SIM_ROOT/viewer/src/world.hpp" -nt "$cesium_viewer" ||
+    "$SIM_ROOT/viewer/src/video.cpp" -nt "$cesium_viewer" ||
+    "$SIM_ROOT/viewer/src/video.hpp" -nt "$cesium_viewer" ||
     "$SIM_ROOT/scripts/build/cesium-native.sh" -nt "$cesium_viewer" ||
     "$SIM_ROOT/viewer/cesium/CMakeLists.txt" -nt "$cesium_viewer" ||
     "$SIM_ROOT/viewer/cesium/raylib_tileset.cpp" -nt "$cesium_viewer" ||
