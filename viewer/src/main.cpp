@@ -253,32 +253,67 @@ Vector3 rotate_by_px4_quaternion(const Vehicle & vehicle, const Vector3 body_vec
   return sim::world::view_point(ned.y, -ned.z, ned.x);
 }
 
-void draw_drone(const Vehicle & vehicle, const Vector3 center)
+/// A quadcopter in the X configuration: hub and top shell, four arms, motor
+/// bells, two-blade props, landing skids and a nose camera. It is built in the
+/// body frame -- x forward, y up, z right -- and placed with one transform, so
+/// every part follows the attitude PX4 reports. The front arms carry the
+/// vehicle colour, as real airframes mark their nose, and failsafe turns the
+/// hub and shell red at any distance. Props turn while armed, under a faint
+/// disc that reads as speed; `prop_degrees` comes from wall time so they turn
+/// at the same rate at any frame rate. Past 120 m the detail is a few pixels,
+/// so a distant drone is just its hub and discs.
+void draw_drone(
+  const Vehicle & vehicle, const Vector3 center, const float prop_degrees, const Vector3 camera_position)
 {
   const Color color = vehicle_color(vehicle.id);
   const Vector3 forward = Vector3Normalize(rotate_by_px4_quaternion(vehicle, {1.0F, 0.0F, 0.0F}));
   const Vector3 right = Vector3Normalize(rotate_by_px4_quaternion(vehicle, {0.0F, 1.0F, 0.0F}));
   const Vector3 up = Vector3Negate(
     Vector3Normalize(rotate_by_px4_quaternion(vehicle, {0.0F, 0.0F, 1.0F})));
-  const Vector3 front = Vector3Add(center, Vector3Scale(forward, 0.55F));
-  const Vector3 back = Vector3Add(center, Vector3Scale(forward, -0.42F));
-  DrawCylinderEx(back, front, 0.16F, 0.10F, 10, color);
-  DrawSphere(front, 0.13F, Fade(YELLOW, 0.9F));
-
-  const Vector3 arm_a = Vector3Normalize(Vector3Add(forward, right));
-  const Vector3 arm_b = Vector3Normalize(Vector3Subtract(forward, right));
-  for (const Vector3 arm : {arm_a, arm_b}) {
-    DrawCylinderEx(
-      Vector3Add(center, Vector3Scale(arm, -0.72F)),
-      Vector3Add(center, Vector3Scale(arm, 0.72F)), 0.035F, 0.035F, 6, DARKGRAY);
+  // Columns are the body axes; forward x up = right, so no mirror.
+  const Matrix body{forward.x, up.x, right.x, center.x, forward.y, up.y, right.y, center.y,
+    forward.z, up.z, right.z, center.z, 0.0F, 0.0F, 0.0F, 1.0F};
+  constexpr Color frame{46, 50, 56, 255};
+  constexpr float arm = 0.72F * 0.70710678F;  // motor offset on each body axis
+  const bool detailed = Vector3Distance(center, camera_position) < 120.0F;
+  rlPushMatrix();
+  rlMultMatrixf(MatrixToFloat(body));
+  rlTranslatef(0.0F, 0.26F, 0.0F);  // PX4's position is where the skids touch down
+  DrawCube({0.0F, 0.0F, 0.0F}, 0.42F, 0.12F, 0.26F, vehicle.failsafe ? RED : frame);
+  if (detailed) {
+    DrawCube({0.02F, 0.09F, 0.0F}, 0.30F, 0.06F, 0.18F, vehicle.failsafe ? RED : color);
+    DrawSphereEx({-0.10F, 0.13F, 0.0F}, 0.035F, 4, 6,
+      vehicle.failsafe ? RED : (vehicle.armed ? LIME : LIGHTGRAY));
+    DrawCube({0.23F, -0.07F, 0.0F}, 0.06F, 0.05F, 0.08F, DARKGRAY);
+    DrawSphereEx({0.27F, -0.10F, 0.0F}, 0.045F, 5, 8, BLACK);
+    for (const float side : {-1.0F, 1.0F}) {
+      for (const float along : {-0.10F, 0.10F}) {
+        DrawCylinderEx({along, -0.06F, side * 0.10F}, {along, -0.26F, side * 0.20F}, 0.012F, 0.012F, 5, frame);
+      }
+      DrawCylinderEx({0.24F, -0.26F, side * 0.20F}, {-0.24F, -0.26F, side * 0.20F}, 0.016F, 0.016F, 6, frame);
+    }
   }
-  for (const Vector3 direction : {arm_a, Vector3Negate(arm_a), arm_b, Vector3Negate(arm_b)}) {
-    const Vector3 rotor = Vector3Add(center, Vector3Scale(direction, 0.72F));
-    DrawCylinderEx(
-      Vector3Add(rotor, Vector3Scale(up, -0.025F)),
-      Vector3Add(rotor, Vector3Scale(up, 0.025F)), 0.28F, 0.28F, 18, Fade(color, 0.72F));
+  int motor = 0;
+  for (const float along : {arm, -arm}) {
+    for (const float side : {arm, -arm}) {
+      // Diagonal pairs turn the same way, as on a real X frame.
+      const float turn = (along > 0.0F) == (side > 0.0F) ? 1.0F : -1.0F;
+      if (detailed) {
+        DrawCylinderEx({0.0F, 0.0F, 0.0F}, {along, 0.02F, side}, 0.025F, 0.02F, 6, along > 0.0F ? color : frame);
+        DrawCylinder({along, 0.02F, side}, 0.05F, 0.05F, 0.07F, 10, DARKGRAY);
+        rlPushMatrix();
+        rlTranslatef(along, 0.10F, side);
+        rlRotatef(turn * prop_degrees + 47.0F * static_cast<float>(motor), 0.0F, 1.0F, 0.0F);
+        DrawCube({0.0F, 0.0F, 0.0F}, 0.56F, 0.006F, 0.045F, {20, 22, 26, 235});
+        rlPopMatrix();
+      }
+      if (vehicle.armed || !detailed) {
+        DrawCylinder({along, 0.108F, side}, 0.28F, 0.28F, 0.004F, 20, Fade(color, detailed ? 0.18F : 0.6F));
+      }
+      ++motor;
+    }
   }
-  DrawSphere(center, 0.19F, vehicle.failsafe ? RED : (vehicle.armed ? LIME : LIGHTGRAY));
+  rlPopMatrix();
 }
 
 /// A bipedal factory robot, in the manner of an Agility Digit: digitigrade legs
@@ -884,11 +919,14 @@ int main(int argc, char ** argv)
 #else
   const sim::world::World world = sim::world::read(world_path);
 #endif
+  // A real city: kilometre sight lines, and vehicles that are specks from the
+  // default view, so they get screen markers as well as their models.
 #ifdef DITTO_CESIUM_VIEWER
-  if (world.model_loaded || cesium_tiles) rlSetClipPlanes(1.0, 10000.0);
+  const bool city_map = world.model_loaded || cesium_tiles != nullptr;
 #else
-  if (world.model_loaded) rlSetClipPlanes(1.0, 5000.0);
+  const bool city_map = world.model_loaded;
 #endif
+  if (city_map) rlSetClipPlanes(1.0, 10000.0);
   if (!world_path.empty()) {
     if (world.empty()) {
 #ifdef DITTO_CESIUM_VIEWER
@@ -939,6 +977,19 @@ int main(int argc, char ** argv)
   std::unordered_map<std::string, NetworkStatus> link_status;
   auto next_metrics_read = Clock::now();
   std::string selected_vehicle;
+  // Selecting a vehicle, on the map or in the sidebar, also follows it: the
+  // camera snaps in behind it and rides along. Right-drag then orbits relative
+  // to its heading; a pan, F, or a click on bare ground lets go.
+  bool following = false;
+  bool snap_follow = false;
+  float follow_yaw_offset = 0.0F;
+  const auto select_vehicle = [&](const std::string & id) {
+    selected_vehicle = id;
+    following = snap_follow = !id.empty();
+    follow_yaw_offset = 0.0F;
+  };
+  // Opens already following one: for a headless capture of that view, or a demo.
+  if (const char * preselect = std::getenv("SIM_VIEWER_SELECT")) select_vehicle(preselect);
   // A left-press in the world both pans the camera and, if it turns out not to
   // have moved, selects whatever is under it. Only a release close to where the
   // press landed counts as a click.
@@ -1018,7 +1069,7 @@ int main(int argc, char ** argv)
       IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
     {
       const auto delta = GetMouseDelta();
-      yaw -= delta.x * 0.006F;
+      (following ? follow_yaw_offset : yaw) -= delta.x * 0.006F;
       pitch = std::clamp(pitch + delta.y * 0.006F, 0.12F, 1.35F);
     }
     if (!pointer_on_inspector && GetMousePosition().x < sidebar_left &&
@@ -1030,6 +1081,7 @@ int main(int argc, char ** argv)
     if (!pointer_on_inspector && GetMousePosition().x < sidebar_left &&
       IsMouseButtonDown(MOUSE_BUTTON_LEFT))
     {
+      if (following && Vector2Distance(press_at, GetMousePosition()) > 4.0F) following = false;
       const auto delta = GetMouseDelta();
       const Vector3 position{
         camera.target.x + std::sin(yaw) * std::cos(pitch) * distance,
@@ -1043,25 +1095,16 @@ int main(int argc, char ** argv)
       camera.target = Vector3Add(camera.target, Vector3Scale(right, -delta.x * scale));
       camera.target = Vector3Add(camera.target, Vector3Scale(ground_forward, delta.y * scale));
     }
-    distance = std::clamp(distance - GetMouseWheelMove() * 3.0F, 10.0F, map_size * 2.0F);
+    // Proportional, so a notch means as much at a 500 m city view as at a
+    // chase view a few metres behind one drone.
+    distance = std::clamp(distance * std::pow(0.88F, GetMouseWheelMove()), 3.0F, map_size * 2.0F);
     if (IsKeyPressed(KEY_F)) {
+      following = false;
       yaw = sim::world::kDefaultYawRad;
       pitch = sim::world::kDefaultPitchRad;
       distance = initial_distance;
       camera.target = home_target;
     }
-    camera.position = {
-      camera.target.x + std::sin(yaw) * std::cos(pitch) * distance,
-      camera.target.y + std::sin(pitch) * distance,
-      camera.target.z + std::cos(yaw) * std::cos(pitch) * distance,
-    };
-#ifdef DITTO_CESIUM_VIEWER
-    if (cesium_tiles) {
-      // The projection spans the whole window (the sidebar only scissors it),
-      // so tile selection must see the same frustum or it culls the left edge.
-      cesium_tiles->update(camera, GetScreenWidth(), GetScreenHeight(), GetFrameTime());
-    }
-#endif
 
     Snapshot snapshot;
     {
@@ -1091,13 +1134,41 @@ int main(int argc, char ** argv)
       }
       visible.emplace(id, presented(presentations.at(id), render_time));
     }
+    if (following) {
+      if (const auto found = visible.find(selected_vehicle); found != visible.end()) {
+        const Vehicle & vehicle = found->second;
+        camera.target = sim::world::view_point(vehicle.east_m, -vehicle.down_m, vehicle.north_m);
+        // camera.position sits at (sin yaw, cos yaw) from the target, so this
+        // yaw puts it opposite the nose. Eased, so attitude jitter does not
+        // shake the view, except on the snap.
+        const Vector3 nose = rotate_by_px4_quaternion(vehicle, {1.0F, 0.0F, 0.0F});
+        if (std::hypot(nose.x, nose.z) > 0.1F) {
+          const float behind = std::atan2(-nose.x, -nose.z) + follow_yaw_offset;
+          yaw += std::remainder(behind - yaw, 2.0F * PI) *
+            (snap_follow ? 1.0F : 1.0F - std::exp(-4.0F * GetFrameTime()));
+        }
+        if (snap_follow) {
+          pitch = 0.3F;
+          distance = 6.0F;
+          snap_follow = false;
+        }
+      }
+    }
+    camera.position = {
+      camera.target.x + std::sin(yaw) * std::cos(pitch) * distance,
+      camera.target.y + std::sin(pitch) * distance,
+      camera.target.z + std::cos(yaw) * std::cos(pitch) * distance,
+    };
+#ifdef DITTO_CESIUM_VIEWER
+    if (cesium_tiles) {
+      // The projection spans the whole window (the sidebar only scissors it),
+      // so tile selection must see the same frustum or it culls the left edge.
+      cesium_tiles->update(camera, GetScreenWidth(), GetScreenHeight(), GetFrameTime());
+    }
+#endif
 
     BeginDrawing();
-#ifdef DITTO_CESIUM_VIEWER
-    ClearBackground((world.model_loaded || cesium_tiles) ? Color{174, 214, 235, 255} : Color{238, 243, 247, 255});
-#else
-    ClearBackground(world.model_loaded ? Color{174, 214, 235, 255} : Color{238, 243, 247, 255});
-#endif
+    ClearBackground(city_map ? Color{174, 214, 235, 255} : Color{238, 243, 247, 255});
     BeginScissorMode(0, 0, static_cast<int>(sidebar_left), GetScreenHeight());
     BeginMode3D(camera);
 #ifdef DITTO_CESIUM_VIEWER
@@ -1111,6 +1182,7 @@ int main(int argc, char ** argv)
     if (!world.model_loaded) DrawGrid(static_cast<int>(map_size), 1.0F);
     sim::world::draw(world, camera.position);
     }
+    const float prop_degrees = static_cast<float>(std::fmod(GetTime() * 3.5, 1.0) * 360.0);
     for (const auto & [id, vehicle] : visible) {
       const Vector3 position = sim::world::view_point(vehicle.east_m, -vehicle.down_m, vehicle.north_m);
       if (vehicle.ground) {
@@ -1123,7 +1195,7 @@ int main(int argc, char ** argv)
           phase + vehicle.speed_mps / stride_pair_m * 2.0F * PI * GetFrameTime(), 2.0F * PI);
         draw_robot(vehicle, position, phase);
       } else {
-        draw_drone(vehicle, position);
+        draw_drone(vehicle, position, prop_degrees, camera.position);
       }
     }
 
@@ -1215,7 +1287,7 @@ int main(int argc, char ** argv)
       draw_text(landmark.name.c_str(), tag.x + 8.0F, tag.y + 4.0F, 13, RAYWHITE);
     }
 #endif
-    if (world.model_loaded) {
+    if (city_map) {
       std::vector<std::string> ids;
       ids.reserve(visible.size());
       for (const auto & [id, vehicle] : visible) ids.push_back(id);
@@ -1223,8 +1295,13 @@ int main(int argc, char ** argv)
       std::vector<Vector2> placed;
       for (const auto & id : ids) {
         const auto & vehicle = visible.at(id);
-        const Vector2 at = GetWorldToScreen(
-          sim::world::view_point(vehicle.east_m, -vehicle.down_m + 2.0F, vehicle.north_m), camera);
+        const Vector3 over = sim::world::view_point(vehicle.east_m, -vehicle.down_m + 2.0F, vehicle.north_m);
+        // Close enough to see the model, or behind the camera where the
+        // projection folds onto the screen: no marker.
+        const Vector3 from_camera = Vector3Subtract(over, camera.position);
+        if (Vector3Length(from_camera) < 40.0F ||
+          Vector3DotProduct(from_camera, Vector3Subtract(camera.target, camera.position)) <= 0.0F) continue;
+        const Vector2 at = GetWorldToScreen(over, camera);
         if (at.x < 10 || at.x >= sidebar_left - 10 || at.y < 100 || at.y >= GetScreenHeight() - 30) continue;
         const Color color = now - vehicle.published_unix_ms > 2000 ? ORANGE : vehicle_color(id);
         DrawCircleV(at, 7.0F, color);
@@ -1358,7 +1435,7 @@ int main(int argc, char ** argv)
       draw_text(label, button.x + 8.0F, button.y + 3.0F, 12, RAYWHITE);
       const Rectangle row_button{sidebar_left, row, sidebar_width - 104.0F, row_height};
       if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), row_button)) {
-        selected_vehicle = id;
+        select_vehicle(id);
       }
       row += row_height;
     }
@@ -1519,7 +1596,7 @@ int main(int argc, char ** argv)
         }
         // Clicking bare ground clears the selection, which is how the inspector
         // gets closed without going back to the row that opened it.
-        selected_vehicle = hit != nullptr ? *hit : std::string();
+        select_vehicle(hit != nullptr ? *hit : std::string());
       }
     }
 
