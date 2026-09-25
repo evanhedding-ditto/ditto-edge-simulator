@@ -20,7 +20,7 @@ wait_for_socket "$(node_socket "px4_$index")"
 wait_for_file "$SIM_RUNTIME_DIR/px4-telemetry-ready" "${SIM_TELEMETRY_GATE_WAIT_TIMEOUT_SECONDS:-300}"
 # A synthetic vehicle cannot reuse PX4's port pair -- 14540+i and 14580+i
 # collide with each other past 40 vehicles -- so the synthetic tier has its own.
-if [[ "${SIM_SYNTHETIC_FLEET:-0}" == 1 ]]; then
+if is_synthetic_vehicle "$index"; then
   endpoint="udpin:127.0.0.1:$(synthetic_adapter_port "$index")"
 else
   endpoint="udpin:127.0.0.1:$((14540 + index))"

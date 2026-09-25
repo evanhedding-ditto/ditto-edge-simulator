@@ -89,6 +89,9 @@ if [[ "$SIM_PROCESS_TEMPLATE" == *.sh ]]; then
   # sim_init sources the scenario but exports only the path variables, so the
   # generator is a child process that would otherwise see no fleet size.
   SIM_VEHICLE_COUNT="$SIM_VEHICLE_COUNT" SIM_MAVLINK_VEHICLES="${SIM_MAVLINK_VEHICLES:-}" \
+    SIM_SYNTHETIC_FLEET="${SIM_SYNTHETIC_FLEET:-0}" \
+    SIM_SYNTHETIC_VEHICLE_COUNT="$SIM_SYNTHETIC_VEHICLE_COUNT" \
+    SIM_SYNTHETIC_START_INDEX="$SIM_SYNTHETIC_START_INDEX" \
     SIM_GCS_TCP_PORT="${SIM_GCS_TCP_PORT:-}" "$SIM_ROOT/$SIM_PROCESS_TEMPLATE" > "$template"
 fi
 envsubst < "$template" > "$SIM_RUNTIME_DIR/process-compose.yaml"

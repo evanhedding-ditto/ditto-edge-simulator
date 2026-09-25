@@ -15,7 +15,8 @@ binary="$SIM_ROOT/build/cmake/ditto_synthetic_fleet"
 # fleet in the same place and the viewer needs no reconfiguration.
 
 arguments=(
-  --count "$SIM_VEHICLE_COUNT"
+  --count "$SIM_SYNTHETIC_VEHICLE_COUNT"
+  --start-index "$SIM_SYNTHETIC_START_INDEX"
   --control-local-port-base "$(synthetic_autopilot_port 0)"
   --control-remote-port-base "$(synthetic_adapter_port 0)"
 )

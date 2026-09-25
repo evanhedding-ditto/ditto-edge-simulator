@@ -640,6 +640,7 @@ private:
   std::cerr
     << "usage: " << program << " --count N [options]\n"
     << "  --count N                    number of synthetic vehicles (1-255)\n"
+    << "  --start-index N              first simulator vehicle index (default 0)\n"
     << "  --origin-lat DEG             geodetic origin latitude  (default 36.01883233670948)\n"
     << "  --origin-lon DEG             geodetic origin longitude (default -78.9684198511774)\n"
     << "  --origin-alt M               geodetic origin altitude  (default 0)\n"
@@ -667,11 +668,12 @@ double number(const char * text, const char * name)
 /// Every port this fleet will occupy, checked before a single socket is opened.
 /// A silent overlap between two of these ranges is a whole fleet flying one
 /// vehicle's setpoints, which is far harder to recognise than a refusal here.
-void check_port_ranges(const long count, const std::array<long, 3> & bases,
+void check_port_ranges(const long count, const long start_index,
+  const std::array<long, 3> & bases,
   const char * program)
 {
   for (const auto base : bases) {
-    if (base < 1 || base + count > 65536) {
+    if (base < 1 || base + start_index + count > 65536) {
       usage(program, "a port base plus --count falls outside the port range");
     }
   }
@@ -691,6 +693,7 @@ void check_port_ranges(const long count, const std::array<long, 3> & bases,
 int main(int argc, char ** argv)
 {
   long count = 0;
+  long start_index = 0;
   Origin origin;
   long display_base = 19410;
   long control_local_base = 25540;
@@ -706,6 +709,8 @@ int main(int argc, char ** argv)
       };
     if (flag == "--count") {
       count = std::lround(number(value(), "--count"));
+    } else if (flag == "--start-index") {
+      start_index = std::lround(number(value(), "--start-index"));
     } else if (flag == "--origin-lat") {
       origin.latitude_deg = number(value(), "--origin-lat");
     } else if (flag == "--origin-lon") {
@@ -725,7 +730,11 @@ int main(int argc, char ** argv)
   if (count < 1 || count > 255) {
     usage(argv[0], "--count must be in [1, 255]");
   }
-  check_port_ranges(count, {display_base, control_local_base, control_remote_base}, argv[0]);
+  if (start_index < 0 || start_index + count > 255) {
+    usage(argv[0], "--start-index plus --count must fit vehicle indices [0, 254]");
+  }
+  check_port_ranges(
+    count, start_index, {display_base, control_local_base, control_remote_base}, argv[0]);
 
   std::signal(SIGINT, handle_signal);
   std::signal(SIGTERM, handle_signal);
@@ -735,10 +744,10 @@ int main(int argc, char ** argv)
   try {
     for (long index = 0; index < count; ++index) {
       auto vehicle = std::make_unique<Vehicle>(
-        static_cast<std::size_t>(index), origin,
-        static_cast<std::uint16_t>(display_base + index),
-        static_cast<std::uint16_t>(control_local_base + index),
-        static_cast<std::uint16_t>(control_remote_base + index));
+        static_cast<std::size_t>(start_index + index), origin,
+        static_cast<std::uint16_t>(display_base + start_index + index),
+        static_cast<std::uint16_t>(control_local_base + start_index + index),
+        static_cast<std::uint16_t>(control_remote_base + start_index + index));
       vehicle->set_schedule(static_cast<std::size_t>(index), static_cast<std::size_t>(count));
       fleet.push_back(std::move(vehicle));
     }
@@ -748,9 +757,11 @@ int main(int argc, char ** argv)
   }
 
   std::cout << "synthetic fleet: " << count << " vehicles, display "
-            << display_base << "-" << (display_base + count - 1) << ", control "
-            << control_local_base << "-" << (control_local_base + count - 1) << " -> "
-            << control_remote_base << "-" << (control_remote_base + count - 1) << "\n"
+            << (display_base + start_index) << "-" << (display_base + start_index + count - 1)
+            << ", control " << (control_local_base + start_index) << "-"
+            << (control_local_base + start_index + count - 1) << " -> "
+            << (control_remote_base + start_index) << "-"
+            << (control_remote_base + start_index + count - 1) << "\n"
             << std::flush;
 
   // One thread drives every vehicle. The per-vehicle work is a handful of

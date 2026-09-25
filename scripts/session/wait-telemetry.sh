@@ -42,7 +42,11 @@ else
   wait_for_fleet_infrastructure "$fleet_timeout"
   wait_for_fleet_px4_startup "$fleet_timeout"
   wait_for_fleet_px4_direct_streams "$fleet_timeout"
-  printf '[PX4] Verifying direct position and attitude telemetry\n'
+  if (( SIM_SYNTHETIC_VEHICLE_COUNT > 0 )); then
+    printf '[Telemetry] Verifying PX4 and synthetic position and attitude\n'
+  else
+    printf '[PX4] Verifying direct position and attitude telemetry\n'
+  fi
 fi
 if "$probe" --timeout "$ready_timeout" "${arguments[@]}" 2>&1 | tee -a "$report"; then
   touch "$marker"

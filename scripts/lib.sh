@@ -41,6 +41,20 @@ sim_init() {
   # sim_init once per scenario in one shell, and an exported :=default would
   # pin the first scenario's directory while SIM_VEHICLE_COUNT changed under it.
   [[ -n "${SIM_SCENARIO_ID:-}" ]] || die "scenario defines no SIM_SCENARIO_ID: $SIM_SCENARIO_FILE"
+  if [[ "${SIM_SYNTHETIC_FLEET:-0}" == 1 ]]; then
+    : "${SIM_SYNTHETIC_VEHICLE_COUNT:=$SIM_VEHICLE_COUNT}"
+  else
+    : "${SIM_SYNTHETIC_VEHICLE_COUNT:=0}"
+  fi
+  : "${SIM_SYNTHETIC_START_INDEX:=0}"
+  [[ "$SIM_SYNTHETIC_VEHICLE_COUNT" =~ ^[0-9]+$ && "$SIM_SYNTHETIC_START_INDEX" =~ ^[0-9]+$ ]] ||
+    die "synthetic vehicle count and start index must be non-negative integers"
+  (( SIM_SYNTHETIC_START_INDEX + SIM_SYNTHETIC_VEHICLE_COUNT <= SIM_VEHICLE_COUNT )) ||
+    die "synthetic vehicle range exceeds SIM_VEHICLE_COUNT"
+  if [[ "${SIM_SYNTHETIC_FLEET:-0}" == 1 ]]; then
+    (( SIM_SYNTHETIC_START_INDEX == 0 && SIM_SYNTHETIC_VEHICLE_COUNT == SIM_VEHICLE_COUNT )) ||
+      die "SIM_SYNTHETIC_FLEET=1 must cover every vehicle from index 0"
+  fi
   # Space-separated indices only. A comma or a stray character would match no
   # vehicle, every vehicle would count as a ROS vehicle, and the punishment is a
   # silent ROS 2 install for a fleet that never launches ROS.
@@ -137,6 +151,14 @@ node_socket() { printf '%s/edge.sock\n' "$(node_dir "$1")"; }
 synthetic_adapter_port() { printf '%s\n' "$(( ${SIM_SYNTHETIC_ADAPTER_PORT_BASE:-24540} + $1 ))"; }
 synthetic_autopilot_port() { printf '%s\n' "$(( ${SIM_SYNTHETIC_AUTOPILOT_PORT_BASE:-25540} + $1 ))"; }
 
+is_synthetic_vehicle() {
+  [[ "${SIM_SYNTHETIC_FLEET:-0}" == 1 ]] && return 0
+  (( SIM_SYNTHETIC_VEHICLE_COUNT > 0 && $1 >= SIM_SYNTHETIC_START_INDEX &&
+    $1 < SIM_SYNTHETIC_START_INDEX + SIM_SYNTHETIC_VEHICLE_COUNT ))
+}
+
+real_px4_count() { printf '%s\n' "$((SIM_VEHICLE_COUNT - SIM_SYNTHETIC_VEHICLE_COUNT))"; }
+
 # Startup phase timestamps, one line per event, written outside nodes/ so they
 # survive teardown.  Twenty vehicles append concurrently; each line is far under
 # PIPE_BUF, so O_APPEND writes do not interleave.
@@ -198,6 +220,7 @@ wait_for_fleet_edge_sockets() {
 wait_for_fleet_xrce_listeners() {
   local index mavlink vehicle
   for ((index = 0; index < SIM_VEHICLE_COUNT; ++index)); do
+    is_synthetic_vehicle "$index" && continue
     mavlink=false
     for vehicle in ${SIM_MAVLINK_VEHICLES:-}; do
       [[ "$vehicle" == "$index" ]] && mavlink=true
@@ -214,15 +237,15 @@ is_mavlink_vehicle() {
   return 1
 }
 
-# Does this scenario run any ROS 2 vehicle? A synthetic fleet is MAVLink
-# throughout, and a scenario may list every vehicle in SIM_MAVLINK_VEHICLES.
+# Does this scenario run any ROS 2 vehicle? Synthetic vehicles use MAVLink;
+# real PX4 vehicles may also use the native MAVLink adapter.
 # Nothing in the ROS tier -- the underlay, the adapter, the XRCE agent, or the
 # ros pixi environment -- is built or installed when this is false, which is what
 # keeps a synthetic-only user from paying for ROS 2 they never run.
 scenario_uses_ros() {
   local index
-  [[ "${SIM_SYNTHETIC_FLEET:-0}" == 1 ]] && return 1
   for ((index = 0; index < SIM_VEHICLE_COUNT; ++index)); do
+    is_synthetic_vehicle "$index" && continue
     is_mavlink_vehicle "$index" || return 0
   done
   return 1
@@ -307,6 +330,7 @@ wait_for_fleet_infrastructure() {
   local index edge=() xrce=() px4=() relay_deadline="$((SECONDS + 15))"
   for ((index = 0; index < SIM_VEHICLE_COUNT; ++index)); do
     edge+=("px4_$index")
+    is_synthetic_vehicle "$index" && continue
     px4+=("$index")
     is_mavlink_vehicle "$index" || xrce+=("$index")
   done
@@ -323,7 +347,7 @@ wait_for_fleet_infrastructure() {
   fi
   report_tier Edge "Edge Servers ready" "$timeout" edge_socket_ready "${edge[@]}"
   ((${#xrce[@]} == 0)) || report_tier XRCE "DDS agents ready" "$timeout" xrce_agent_ready "${xrce[@]}"
-  report_tier PX4 "processes launched" "$timeout" px4_process_ready "${px4[@]}"
+  ((${#px4[@]} == 0)) || report_tier PX4 "processes launched" "$timeout" px4_process_ready "${px4[@]}"
 }
 
 wait_for_px4_sih() {
@@ -345,12 +369,13 @@ wait_for_px4_sih() {
 wait_for_fleet_px4_sih() {
   local timeout="${1:?usage: wait_for_fleet_px4_sih <timeout>}"
   local deadline="$((SECONDS + timeout))" index next_status
-  printf '[PX4] Booting %s vehicles\n' "$SIM_VEHICLE_COUNT"
+  printf '[PX4] Booting %s vehicles\n' "$(real_px4_count)"
   for ((index = 0; index < SIM_VEHICLE_COUNT; ++index)); do
+    is_synthetic_vehicle "$index" && continue
     next_status="$SECONDS"
     while :; do
       if [[ -f "$(node_dir "px4_$index")/px4/sih-ready" ]] || grep -qF "Simulation loop with" "$(node_dir "px4_$index")/px4/px4.log" 2>/dev/null; then
-        printf '[PX4] %s/%s ready (px4_%s)\n' "$((index + 1))" "$SIM_VEHICLE_COUNT" "$index"
+        printf '[PX4] SIH ready (px4_%s)\n' "$index"
         break
       fi
       (( SECONDS < deadline )) || die "timed out waiting for fleet PX4 SIH"
@@ -368,11 +393,12 @@ wait_for_fleet_px4_direct_streams() {
   local deadline="$((SECONDS + timeout))" index local_port remote_port next_status
   printf '[PX4] Activating direct telemetry streams\n'
   for ((index = 0; index < SIM_VEHICLE_COUNT; ++index)); do
+    is_synthetic_vehicle "$index" && continue
     local_port="$((19450 + index))"; remote_port="$((19410 + index))"
     next_status="$SECONDS"
     while :; do
       if grep -qF "on udp port $local_port remote port $remote_port" "$(node_dir "px4_$index")/px4/px4.log" 2>/dev/null; then
-        printf '[PX4] %s/%s direct streams ready (px4_%s)\n' "$((index + 1))" "$SIM_VEHICLE_COUNT" "$index"
+        printf '[PX4] direct stream ready (px4_%s)\n' "$index"
         break
       fi
       (( SECONDS < deadline )) || die "timed out waiting for direct PX4 telemetry stream: px4_$index"
@@ -414,12 +440,14 @@ wait_for_fleet_px4_startup() {
   local -a pending done_state last_size last_change tries
   local index log size ready list
   for ((index = 0; index < SIM_VEHICLE_COUNT; ++index)); do
+    is_synthetic_vehicle "$index" && continue
     done_state[index]=0; last_size[index]=-1; last_change[index]="$SECONDS"; tries[index]=1
   done
-  printf '[PX4] Waiting for %s startups\n' "$SIM_VEHICLE_COUNT"
+  printf '[PX4] Waiting for %s startups\n' "$(real_px4_count)"
   while :; do
     ready=0; pending=()
     for ((index = 0; index < SIM_VEHICLE_COUNT; ++index)); do
+      is_synthetic_vehicle "$index" && continue
       log="$(node_dir "px4_$index")/px4/px4.log"
       if (( done_state[index] == 0 )) &&
         grep -qF "Startup script returned successfully" "$log" 2>/dev/null
@@ -451,15 +479,15 @@ wait_for_fleet_px4_startup() {
         last_size[index]=-1; last_change[index]="$SECONDS"
       fi
     done
-    if (( ready == SIM_VEHICLE_COUNT )); then
-      printf '[PX4] %s/%s started\n' "$ready" "$SIM_VEHICLE_COUNT"
+    if (( ready == SIM_VEHICLE_COUNT - SIM_SYNTHETIC_VEHICLE_COUNT )); then
+      printf '[PX4] %s/%s started\n' "$ready" "$(real_px4_count)"
       return
     fi
     (( SECONDS < deadline )) || die "timed out waiting for PX4 startup: ${pending[*]}"
     if (( ready != previous )) || (( SECONDS >= next )); then
       list="${pending[*]}"
       (( ${#pending[@]} <= 6 )) || list="${pending[*]:0:6} (+$(( ${#pending[@]} - 6 )) more)"
-      printf '[PX4] %s/%s started; waiting for %s\n' "$ready" "$SIM_VEHICLE_COUNT" "$list"
+      printf '[PX4] %s/%s started; waiting for %s\n' "$ready" "$(real_px4_count)" "$list"
       previous="$ready"; next="$((SECONDS + 5))"
     fi
     sleep 1

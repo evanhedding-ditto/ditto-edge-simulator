@@ -101,7 +101,8 @@ Only one scenario at a time. Starting a second while the first is up is refused.
 | --- | --- | --- |
 | `mvp-two-px4` | 2 PX4 | the default, and the smallest thing that proves the whole path |
 | `park-mgm-two-px4` | 2 PX4 | the same stack over a 1 km display-only map around Park MGM |
-| `park-mgm-cesium` | 1 PX4 | Park MGM in Cesium photorealistic tiles, flown and watched from a phone |
+| `park-mgm-cesium` | 1 PX4 | Park MGM Cesium MVP; fly and watch from UAS Tool |
+| `park-mgm-cesium-10` | 1 PX4 + 10 synthetic | The MVP plus ten cloud-connected, commandable synthetic nodes |
 | `mvp-four-mixed` | 4 PX4 | two ROS 2 adapters, two native MAVLink adapters |
 | `mvp-twenty-mixed` | 20 PX4 | ten of each adapter; the real-stack ceiling on one machine |
 | `synthetic-twenty` | 20 synthetic | same shape as the above, without PX4 itself |
@@ -112,6 +113,15 @@ process emulates N PX4s: a kinematic integrator wearing PX4's MAVLink manners,
 streaming the same messages on the same schedule and honouring the same
 arm-and-offboard handshake, down to refusing offboard until setpoints are
 already flowing.
+
+`park-mgm-cesium-10` builds on the `park-mgm-cesium` MVP: it keeps `px4_0` real
+for phone flight and video, and runs `px4_1` through `px4_10` synthetically.
+Every vehicle has its own Edge Server and adapter; the scenario connects each
+node to Ditto Cloud.
+
+Run the baseline with `pixi run sim park-mgm-cesium`, or the expanded scenario
+with `pixi run sim park-mgm-cesium-10`. In the expanded scenario, commands to
+`px4_1` through `px4_10` still travel through their Edge Server adapters.
 
 Everything above that is real. Each vehicle gets its own
 `px4-mavlink-ditto-bridge` process — the same binary a PX4 vehicle uses — and
@@ -223,10 +233,10 @@ viewer:
 build/cmake/ditto_observer_client/ditto_observer_ctl show
 ```
 
-The Ditto Cloud link is off by default. Start with `SIM_ENABLE_CLOUD_SYNC=1` to
-see it, and the observer draws a stalk on every node holding one. Cloud paths
-never show up in a presence graph's connections, so the observer synthesises
-those edges from each peer's `is_connected_to_ditto_cloud` flag.
+The Ditto Cloud link is off by default; both Park MGM Cesium scenarios enable
+it. The observer draws a stalk on every node holding one. Cloud paths never
+show up in a presence graph's connections, so the observer synthesises those
+edges from each peer's `is_connected_to_ditto_cloud` flag.
 
 ## The world
 
@@ -292,17 +302,19 @@ map past four vehicles, so restarting it mid-flight does not shift the fleet.
 
 ## Flying from a phone
 
-`pixi run sim park-mgm-cesium` opens its PX4 to a ground station on the same
-Wi-Fi, such as UAS Tool. For vehicle *i*:
+`pixi run sim park-mgm-cesium` opens `px4_0` to a ground station on the same
+Wi-Fi, such as UAS Tool. `park-mgm-cesium-10` keeps that endpoint and adds ten
+synthetic nodes:
 
-- MAVLink: TCP to this Mac's IP, port `5760 + i` (`SIM_GCS_TCP_PORT`)
-- video: `rtsp://<this Mac's IP>:8554/px4_<i>` (`SIM_RTSP_PORT`), H.264
+- MAVLink: TCP to this Mac's IP, port `5760` (`SIM_GCS_TCP_PORT`)
+- video: `rtsp://<this Mac's IP>:8554/px4_<i>` for any of the eleven vehicles,
+  H.264
   Constrained Baseline, 1280x720 at 30 fps, over UDP or TCP
 
 The MAVLink port is `tools/gcs_relay.cpp`, which bridges each connection to
-PX4's GCS link on loopback. PX4's UDP links latch onto the first sender for good,
-so a phone reconnecting from a new port would never be answered directly. The
-video is the drone's nose camera on a level gimbal, 30 degrees down, which the
+`px4_0`'s GCS link on loopback. PX4's UDP links latch onto the first sender for
+good, so a phone reconnecting from a new port would never be answered directly.
+Each video is the vehicle's nose camera on a level gimbal, 30 degrees down; the
 viewer renders only while someone watches and encodes in hardware
 (`viewer/src/video.cpp`); closing the viewer ends it. While the viewer serves
 video, macOS neither naps it nor lets the Mac idle-sleep. Ditto keeps its own

@@ -30,9 +30,9 @@ if scenario_uses_ros; then
   ros_adapter_binary >/dev/null || "$SIM_ROOT/scripts/build/ros-adapter.sh"
   [[ -x "$SIM_XRCE_ROOT/bin/MicroXRCEAgent" ]] || "$SIM_ROOT/scripts/build/xrce-agent.sh"
 fi
-# A synthetic scenario names no MAVLink vehicles -- every vehicle is one -- so
-# both conditions have to be checked.
-if [[ -n "${SIM_MAVLINK_VEHICLES:-}" || "${SIM_SYNTHETIC_FLEET:-0}" == 1 ]]; then
+# Synthetic vehicles and any real PX4 vehicles assigned to the native adapter
+# need the MAVLink adapter binary.
+if [[ -n "${SIM_MAVLINK_VEHICLES:-}" || "${SIM_SYNTHETIC_VEHICLE_COUNT:-0}" -gt 0 ]]; then
   # Asking the resolver rather than testing bin/ directly: an override or a
   # drop-in then skips the build, instead of building something launch ignores.
   mavlink_adapter_binary >/dev/null || "$SIM_ROOT/scripts/build/mavlink-adapter.sh"

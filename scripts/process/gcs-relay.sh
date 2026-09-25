@@ -9,6 +9,8 @@ sim_init
 # UDP 18570 + i, PX4's own numbering (udp_gcs_port_local in px4-rc.mavlink).
 arguments=()
 for ((index = 0; index < SIM_VEHICLE_COUNT; ++index)); do
+  is_synthetic_vehicle "$index" && continue
   arguments+=(--vehicle "px4_$index" --port "$((SIM_GCS_TCP_PORT + index))" --px4-port "$((18570 + index))")
 done
+(( ${#arguments[@]} > 0 )) || die "SIM_GCS_TCP_PORT needs at least one real PX4 vehicle"
 exec "$SIM_ROOT/build/cmake/ditto_gcs_relay" "${arguments[@]}"
