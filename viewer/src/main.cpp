@@ -254,38 +254,260 @@ Vector3 rotate_by_px4_quaternion(const Vehicle & vehicle, const Vector3 body_vec
   return sim::world::view_point(ned.y, -ned.z, ned.x);
 }
 
-/// What a vehicle's video feed sees: from the lens draw_drone puts on the nose,
-/// but on a gimbal -- level, turning with the heading, 30 degrees down -- as a
-/// real drone's camera is, so the horizon holds still while the airframe tilts.
-Camera3D nose_camera(const Vehicle & vehicle)
+/// The body centre's height above PX4's position, which is where the feet
+/// touch down.
+constexpr float kBodyHeight = 0.26F;
+/// Each motor's offset from the body centre along both body axes: 0.72 m arms.
+constexpr float kMotorReach = 0.72F * 0.70710678F;
+/// Where the props turn, above the arms.
+constexpr float kPropHeight = 0.07F;
+/// The camera ball, under the nose on the centreline, about the body centre.
+constexpr Vector3 kBall{0.21F, -0.135F, 0.0F};
+constexpr float kBallRadius = 0.055F;
+
+/// The camera gimbal under the nose: where its ball hangs, and which way the
+/// ball looks -- level, turning with the heading, 30 degrees down, as a real
+/// drone's camera does, so the horizon holds still while the airframe tilts.
+struct Gimbal {
+  Vector3 ball;
+  Vector3 look;
+  Vector3 up;
+};
+
+Gimbal gimbal(const Vehicle & vehicle)
 {
   const Vector3 forward = rotate_by_px4_quaternion(vehicle, {1.0F, 0.0F, 0.0F});
   const Vector3 up = Vector3Negate(rotate_by_px4_quaternion(vehicle, {0.0F, 0.0F, 1.0F}));
-  const Vector3 lens = Vector3Add(sim::world::view_point(vehicle.east_m, -vehicle.down_m, vehicle.north_m),
-    Vector3Add(Vector3Scale(forward, 0.27F), Vector3Scale(up, 0.16F)));
   const float heading = std::atan2(forward.x, forward.z);
   constexpr float tilt = 30.0F * DEG2RAD;
+  const Vector3 level{std::sin(heading), 0.0F, std::cos(heading)};
+  return {
+    Vector3Add(sim::world::view_point(vehicle.east_m, -vehicle.down_m, vehicle.north_m),
+      Vector3Add(Vector3Scale(forward, kBall.x), Vector3Scale(up, kBodyHeight + kBall.y))),
+    Vector3Add(Vector3Scale(level, std::cos(tilt)), {0.0F, -std::sin(tilt), 0.0F}),
+    Vector3Add(Vector3Scale(level, std::sin(tilt)), {0.0F, std::cos(tilt), 0.0F}),
+  };
+}
+
+/// What a vehicle's video feed sees: out through the window on its gimbal ball.
+Camera3D nose_camera(const Vehicle & vehicle)
+{
+  const Gimbal mount = gimbal(vehicle);
   Camera3D camera{};
-  camera.position = lens;
-  camera.target = Vector3Add(lens, {std::sin(heading) * std::cos(tilt), -std::sin(tilt), std::cos(heading) * std::cos(tilt)});
+  camera.position = Vector3Add(mount.ball, Vector3Scale(mount.look, kBallRadius + 0.005F));
+  camera.target = Vector3Add(camera.position, mount.look);
   camera.up = {0.0F, 1.0F, 0.0F};
   camera.fovy = 48.0F;  // vertical; 77 degrees across at 16:9, a typical drone camera
   camera.projection = CAMERA_PERSPECTIVE;
   return camera;
 }
 
-/// A quadcopter in the X configuration: hub and top shell, four arms, motor
-/// bells, two-blade props, landing skids and a nose camera. It is built in the
-/// body frame -- x forward, y up, z right -- and placed with one transform, so
-/// every part follows the attitude PX4 reports. The front arms carry the
-/// vehicle colour, as real airframes mark their nose, and failsafe turns the
-/// hub and shell red at any distance. Props turn while armed, under a faint
-/// disc that reads as speed; `prop_degrees` comes from wall time so they turn
-/// at the same rate at any frame rate. Past 120 m the detail is a few pixels,
-/// so a distant drone is just its hub and discs.
+/// One vertex of a drone part, built once in the part's own frame.
+struct LitVertex {
+  Vector3 position;
+  Vector3 normal;
+  Color color;
+};
+
+using Surface = std::vector<LitVertex>;
+
+/// A slice through a loft: an ellipse `width` by `height` (half-extents) at
+/// `at` along the axis, raised by `lift` and turned about the axis by `twist`.
+struct Section {
+  float at;
+  float width;
+  float height;
+  float lift = 0.0F;
+  float twist = 0.0F;
+};
+
+/// Appends a loft through `sections` along `axis`, each ellipse drawn as a
+/// `sides`-gon whose flats, not its corners, sit at the stated size, with both
+/// ends capped. Flat normals give a hull its facets; smooth ones suit turned
+/// parts.
+void loft(Surface & surface, const Vector3 origin, const Vector3 axis, const std::vector<Section> & sections,
+  const int sides, const bool smooth, const Color color)
+{
+  const Vector3 u = Vector3Normalize(Vector3CrossProduct(
+    axis, std::fabs(axis.y) > 0.9F ? Vector3{1.0F, 0.0F, 0.0F} : Vector3{0.0F, 1.0F, 0.0F}));
+  const Vector3 v = Vector3CrossProduct(u, axis);
+  const float widen = 1.0F / std::cos(PI / static_cast<float>(sides));
+  const auto middle = [&](const Section & section) {
+    return Vector3Add(origin, Vector3Add(Vector3Scale(axis, section.at), Vector3Scale(v, section.lift)));
+  };
+  std::vector<Vector3> points;
+  points.reserve(sections.size() * static_cast<std::size_t>(sides));
+  for (const auto & section : sections) {
+    const float c = std::cos(section.twist), s = std::sin(section.twist);
+    for (int k = 0; k < sides; ++k) {
+      const float angle = PI * static_cast<float>(2 * k + 1) / static_cast<float>(sides);
+      const float a = section.width * widen * std::cos(angle), b = section.height * widen * std::sin(angle);
+      points.push_back(Vector3Add(middle(section),
+        Vector3Add(Vector3Scale(u, a * c - b * s), Vector3Scale(v, a * s + b * c))));
+    }
+  }
+  const int rings = static_cast<int>(sections.size());
+  const auto at = [&](const int ring, const int k) {
+    return points[static_cast<std::size_t>(ring * sides + (k + sides) % sides)];
+  };
+  // Along the axis crossed with around it points outward.
+  const auto normal = [&](const int ring, const int k) {
+    return Vector3Normalize(Vector3CrossProduct(
+      Vector3Subtract(at(std::min(ring + 1, rings - 1), k), at(std::max(ring - 1, 0), k)),
+      Vector3Subtract(at(ring, k + 1), at(ring, k - 1))));
+  };
+  for (int ring = 0; ring + 1 < rings; ++ring) {
+    for (int k = 0; k < sides; ++k) {
+      const std::array<Vector3, 4> p{at(ring, k), at(ring + 1, k), at(ring + 1, k + 1), at(ring, k + 1)};
+      const Vector3 flat = Vector3Normalize(
+        Vector3CrossProduct(Vector3Subtract(p[2], p[0]), Vector3Subtract(p[3], p[1])));
+      const std::array<Vector3, 4> n = smooth ?
+        std::array<Vector3, 4>{normal(ring, k), normal(ring + 1, k), normal(ring + 1, k + 1), normal(ring, k + 1)} :
+        std::array<Vector3, 4>{flat, flat, flat, flat};
+      for (const int corner : {0, 1, 2, 0, 2, 3}) surface.push_back({p[corner], n[corner], color});
+    }
+  }
+  for (const int ring : {0, rings - 1}) {
+    // Wound to face back along the axis at the first ring, forward at the last.
+    const Vector3 n = Vector3Scale(axis, ring == 0 ? -1.0F : 1.0F);
+    const Vector3 centre = middle(sections[static_cast<std::size_t>(ring)]);
+    for (int k = 0; k < sides; ++k) {
+      surface.push_back({centre, n, color});
+      surface.push_back({at(ring, ring == 0 ? k : k + 1), n, color});
+      surface.push_back({at(ring, ring == 0 ? k + 1 : k), n, color});
+    }
+  }
+}
+
+/// Draws `surface` under the current transform, lit for the way the part
+/// faces: `frame`'s rotation turns its normals into view space. An opaque
+/// `paint` replaces the colours it was built with.
+void draw_lit(const Surface & surface, const Matrix & frame, const Color paint = {}, const unsigned char alpha = 255)
+{
+  // An afternoon sun in the south-west, 55 degrees up, in view space: x east,
+  // y up, z south.
+  constexpr Vector3 sun{-0.406F, 0.819F, 0.406F};
+  rlBegin(RL_TRIANGLES);
+  for (const auto & [position, normal, color] : surface) {
+    const Vector3 n{frame.m0 * normal.x + frame.m4 * normal.y + frame.m8 * normal.z,
+      frame.m1 * normal.x + frame.m5 * normal.y + frame.m9 * normal.z,
+      frame.m2 * normal.x + frame.m6 * normal.y + frame.m10 * normal.z};
+    // Sky from above, bounce from below, and the sun; matte paint has no highlight.
+    const float light = 0.34F + 0.12F * n.y + 0.72F * std::max(0.0F, Vector3DotProduct(n, sun));
+    const Color base = paint.a != 0 ? paint : color;
+    const auto lit = [light](const unsigned char channel) {
+      return static_cast<unsigned char>(std::min(255.0F, static_cast<float>(channel) * light));
+    };
+    rlColor4ub(lit(base.r), lit(base.g), lit(base.b), alpha);
+    rlVertex3f(position.x, position.y, position.z);
+  }
+  rlEnd();
+}
+
+/// The parts of a drone, each drawn whole.
+struct DroneSurfaces {
+  Surface hull;   // hull and battery: red in failsafe, and all a distant drone is
+  Surface frame;  // arms, motors, legs, the GNSS mast and the gimbal's mount
+  Surface marks;  // ID bands on the front arms, painted in the vehicle colour
+  Surface ball;   // the gimbal's camera ball, in its own level frame
+  Surface prop;   // one two-blade prop about its hub
+};
+
+/// A military quadrotor in the X configuration, the size of a Group 2 tactical
+/// airframe: a faceted hull with the battery on its spine, carbon arms on
+/// folding hinges, motor pods standing on their own legs, a GNSS mast, and an
+/// EO/IR ball under the nose. Built once, in the body frame -- x forward, y up,
+/// z right -- about the body centre.
+const DroneSurfaces & drone_surfaces()
+{
+  static const DroneSurfaces surfaces = [] {
+    // Matte olive-grey paint over carbon and dark metal.
+    constexpr Color paint{94, 100, 86, 255}, panel{66, 71, 64, 255}, carbon{36, 38, 40, 255};
+    constexpr Color metal{62, 65, 70, 255}, black{26, 27, 29, 255}, glass{14, 20, 30, 255};
+    constexpr Vector3 x{1.0F, 0.0F, 0.0F}, y{0.0F, 1.0F, 0.0F}, z{0.0F, 0.0F, 1.0F}, down{0.0F, -1.0F, 0.0F};
+    const auto tube = [](Surface & surface, const Vector3 from, const Vector3 to, const float radius,
+      const Color color, const int sides = 6, const bool smooth = true) {
+      loft(surface, from, Vector3Normalize(Vector3Subtract(to, from)),
+        {{0.0F, radius, radius}, {Vector3Distance(from, to), radius, radius}}, sides, smooth, color);
+    };
+    DroneSurfaces s;
+    // Widest behind the middle, sloping down to the nose.
+    loft(s.hull, {}, x, {{-0.29F, 0.055F, 0.034F, 0.004F}, {-0.23F, 0.1F, 0.058F}, {0.08F, 0.125F, 0.068F},
+      {0.22F, 0.1F, 0.056F, -0.008F}, {0.3F, 0.045F, 0.03F, -0.022F}}, 8, false, paint);
+    loft(s.hull, {}, x, {{-0.21F, 0.07F, 0.018F, 0.078F}, {-0.02F, 0.07F, 0.018F, 0.078F}}, 4, false, panel);
+    for (const float along : {1.0F, -1.0F}) {
+      for (const float side : {1.0F, -1.0F}) {
+        const Vector3 root{along * 0.12F, 0.0F, side * 0.1F};
+        const Vector3 motor{along * kMotorReach, 0.0F, side * kMotorReach};
+        tube(s.frame, root, motor, 0.018F, carbon, 8);
+        tube(s.frame, root, Vector3Lerp(root, motor, 0.16F), 0.03F, paint, 6, false);  // folding hinge
+        if (along > 0.0F) {
+          tube(s.marks, Vector3Lerp(root, motor, 0.7F), Vector3Lerp(root, motor, 0.8F), 0.021F, WHITE, 8);
+        }
+        loft(s.frame, motor, y, {{-0.03F, 0.03F, 0.03F}, {0.012F, 0.03F, 0.03F}}, 10, true, panel);
+        loft(s.frame, motor, y, {{0.012F, 0.044F, 0.044F}, {0.062F, 0.044F, 0.044F}, {kPropHeight, 0.036F, 0.036F}},
+          12, true, metal);
+        // A faired leg under each motor, splayed out onto a rubber foot. The
+        // rear pair carry the radio antennas in their lower half.
+        const Vector3 hip{motor.x, -0.02F, motor.z};
+        const Vector3 foot{motor.x * 1.08F, -kBodyHeight, motor.z * 1.08F};
+        const Vector3 leg = Vector3Subtract(Vector3Add(foot, {0.0F, 0.012F, 0.0F}), hip);
+        const float length = Vector3Length(leg);
+        loft(s.frame, hip, Vector3Normalize(leg), {{0.0F, 0.012F, 0.02F}, {length, 0.008F, 0.012F}}, 8, true, carbon);
+        if (along < 0.0F) {
+          loft(s.frame, hip, Vector3Normalize(leg), {{length * 0.45F, 0.0135F, 0.02F}, {length * 0.9F, 0.011F, 0.016F}},
+            8, true, panel);
+        }
+        loft(s.frame, foot, y, {{0.0F, 0.014F, 0.014F}, {0.007F, 0.02F, 0.02F}, {0.02F, 0.011F, 0.011F}}, 8, true,
+          black);
+      }
+    }
+    // A GNSS puck on its mast.
+    tube(s.frame, {0.03F, 0.05F, 0.0F}, {0.03F, 0.14F, 0.0F}, 0.006F, carbon);
+    loft(s.frame, {0.03F, 0.0F, 0.0F}, y, {{0.14F, 0.03F, 0.03F}, {0.15F, 0.03F, 0.03F}, {0.157F, 0.022F, 0.022F}},
+      12, true, paint);
+    // The gimbal's yaw housing and fork. The ball between the tines holds
+    // level, so it is its own surface.
+    loft(s.frame, {kBall.x, 0.0F, 0.0F}, y, {{-0.072F, 0.028F, 0.028F}, {-0.05F, 0.028F, 0.028F}}, 10, true, panel);
+    loft(s.frame, {kBall.x, -0.072F, 0.0F}, z, {{-0.068F, 0.012F, 0.005F}, {0.068F, 0.012F, 0.005F}}, 4, false,
+      panel);
+    for (const float side : {1.0F, -1.0F}) {
+      loft(s.frame, {kBall.x, -0.072F, side * 0.064F}, down,
+        {{0.0F, 0.004F, 0.014F}, {-0.072F - kBall.y, 0.004F, 0.012F}}, 4, false, panel);
+    }
+    std::vector<Section> sphere;
+    for (int ring = 0; ring <= 7; ++ring) {
+      const float angle = PI * (0.04F + 0.92F * static_cast<float>(ring) / 7.0F);
+      const float radius = kBallRadius * std::sin(angle);
+      sphere.push_back({-kBallRadius * std::cos(angle), radius, radius});
+    }
+    loft(s.ball, {}, x, sphere, 12, true, paint);
+    // EO and IR windows, looking along x.
+    loft(s.ball, {0.0F, 0.0F, -0.013F}, x, {{0.038F, 0.02F, 0.02F}, {0.058F, 0.02F, 0.02F}}, 10, true, glass);
+    loft(s.ball, {0.0F, 0.0F, 0.023F}, x, {{0.038F, 0.012F, 0.012F}, {0.057F, 0.012F, 0.012F}}, 10, true, glass);
+    // A spinner, and two blades that taper and flatten toward the tips.
+    loft(s.prop, {}, y, {{0.0F, 0.018F, 0.018F}, {0.01F, 0.018F, 0.018F}, {0.022F, 0.006F, 0.006F}}, 8, true, black);
+    for (const Vector3 blade : {x, Vector3Negate(x)}) {
+      loft(s.prop, {0.0F, 0.005F, 0.0F}, blade, {{0.012F, 0.011F, 0.005F}, {0.045F, 0.021F, 0.0035F, 0.0F, 0.42F},
+        {0.09F, 0.023F, 0.003F, 0.0F, 0.34F}, {0.16F, 0.019F, 0.0025F, 0.0F, 0.25F},
+        {0.23F, 0.013F, 0.002F, 0.0F, 0.18F}, {0.28F, 0.005F, 0.0015F, 0.0F, 0.14F}}, 4, false, black);
+    }
+    return s;
+  }();
+  return surfaces;
+}
+
+/// A drone where PX4 puts it, at the attitude PX4 reports. Close up, the
+/// vehicle colour is only the ID bands on the front arms, which also mark the
+/// nose. Past 120 m the detail is a few pixels, so a distant drone is its hull
+/// under discs in the vehicle colour, which is what tells a fleet apart.
+/// Failsafe turns the hull red at any distance. Props turn while armed, faint
+/// under a dark blur disc; `prop_degrees` comes from wall time so they turn at
+/// the same rate at any frame rate.
 void draw_drone(
   const Vehicle & vehicle, const Vector3 center, const float prop_degrees, const Vector3 camera_position)
 {
+  const DroneSurfaces & surfaces = drone_surfaces();
   const Color color = vehicle_color(vehicle.id);
   const Vector3 forward = Vector3Normalize(rotate_by_px4_quaternion(vehicle, {1.0F, 0.0F, 0.0F}));
   const Vector3 right = Vector3Normalize(rotate_by_px4_quaternion(vehicle, {0.0F, 1.0F, 0.0F}));
@@ -294,42 +516,48 @@ void draw_drone(
   // Columns are the body axes; forward x up = right, so no mirror.
   const Matrix body{forward.x, up.x, right.x, center.x, forward.y, up.y, right.y, center.y,
     forward.z, up.z, right.z, center.z, 0.0F, 0.0F, 0.0F, 1.0F};
-  constexpr Color frame{46, 50, 56, 255};
-  constexpr float arm = 0.72F * 0.70710678F;  // motor offset on each body axis
   const bool detailed = Vector3Distance(center, camera_position) < 120.0F;
+  if (detailed) {
+    const Gimbal mount = gimbal(vehicle);
+    const Vector3 side = Vector3CrossProduct(mount.look, mount.up);
+    const Matrix frame{mount.look.x, mount.up.x, side.x, mount.ball.x, mount.look.y, mount.up.y, side.y,
+      mount.ball.y, mount.look.z, mount.up.z, side.z, mount.ball.z, 0.0F, 0.0F, 0.0F, 1.0F};
+    rlPushMatrix();
+    rlMultMatrixf(MatrixToFloat(frame));
+    draw_lit(surfaces.ball, frame);
+    rlPopMatrix();
+  }
   rlPushMatrix();
   rlMultMatrixf(MatrixToFloat(body));
-  rlTranslatef(0.0F, 0.26F, 0.0F);  // PX4's position is where the skids touch down
-  DrawCube({0.0F, 0.0F, 0.0F}, 0.42F, 0.12F, 0.26F, vehicle.failsafe ? RED : frame);
+  rlTranslatef(0.0F, kBodyHeight, 0.0F);
+  draw_lit(surfaces.hull, body, vehicle.failsafe ? RED : Color{});
   if (detailed) {
-    DrawCube({0.02F, 0.09F, 0.0F}, 0.30F, 0.06F, 0.18F, vehicle.failsafe ? RED : color);
-    DrawSphereEx({-0.10F, 0.13F, 0.0F}, 0.035F, 4, 6,
-      vehicle.failsafe ? RED : (vehicle.armed ? LIME : LIGHTGRAY));
-    DrawCube({0.23F, -0.07F, 0.0F}, 0.06F, 0.05F, 0.08F, DARKGRAY);
-    DrawSphereEx({0.27F, -0.10F, 0.0F}, 0.045F, 5, 8, BLACK);
-    for (const float side : {-1.0F, 1.0F}) {
-      for (const float along : {-0.10F, 0.10F}) {
-        DrawCylinderEx({along, -0.06F, side * 0.10F}, {along, -0.26F, side * 0.20F}, 0.012F, 0.012F, 5, frame);
-      }
-      DrawCylinderEx({0.24F, -0.26F, side * 0.20F}, {-0.24F, -0.26F, side * 0.20F}, 0.016F, 0.016F, 6, frame);
-    }
+    draw_lit(surfaces.frame, body);
+    draw_lit(surfaces.marks, body, color);
+    // Navigation lights, red to port and green to starboard, and a
+    // double-flash anti-collision strobe while armed.
+    constexpr float outboard = kMotorReach + 0.022F;  // on the front motor pods' outer faces
+    DrawSphereEx({outboard, -0.01F, -outboard}, 0.011F, 2, 5, {255, 48, 40, 255});
+    DrawSphereEx({outboard, -0.01F, outboard}, 0.011F, 2, 5, {40, 255, 110, 255});
+    const double beat = std::fmod(GetTime(), 1.2);
+    DrawSphereEx({-0.19F, 0.098F, 0.0F}, 0.012F, 2, 5,
+      vehicle.armed && (beat < 0.05 || (beat > 0.15 && beat < 0.2)) ? WHITE : Color{92, 94, 98, 255});
   }
   int motor = 0;
-  for (const float along : {arm, -arm}) {
-    for (const float side : {arm, -arm}) {
+  for (const float along : {kMotorReach, -kMotorReach}) {
+    for (const float side : {kMotorReach, -kMotorReach}) {
       // Diagonal pairs turn the same way, as on a real X frame.
       const float turn = (along > 0.0F) == (side > 0.0F) ? 1.0F : -1.0F;
       if (detailed) {
-        DrawCylinderEx({0.0F, 0.0F, 0.0F}, {along, 0.02F, side}, 0.025F, 0.02F, 6, along > 0.0F ? color : frame);
-        DrawCylinder({along, 0.02F, side}, 0.05F, 0.05F, 0.07F, 10, DARKGRAY);
         rlPushMatrix();
-        rlTranslatef(along, 0.10F, side);
+        rlTranslatef(along, kPropHeight, side);
         rlRotatef(turn * prop_degrees + 47.0F * static_cast<float>(motor), 0.0F, 1.0F, 0.0F);
-        DrawCube({0.0F, 0.0F, 0.0F}, 0.56F, 0.006F, 0.045F, {20, 22, 26, 235});
+        draw_lit(surfaces.prop, body, {}, vehicle.armed ? 110 : 255);
         rlPopMatrix();
       }
       if (vehicle.armed || !detailed) {
-        DrawCylinder({along, 0.108F, side}, 0.28F, 0.28F, 0.004F, 20, Fade(color, detailed ? 0.18F : 0.6F));
+        DrawCylinder({along, kPropHeight + 0.02F, side}, 0.28F, 0.28F, 0.003F, 16,
+          detailed ? Color{26, 27, 29, 56} : Fade(color, 0.6F));
       }
       ++motor;
     }
