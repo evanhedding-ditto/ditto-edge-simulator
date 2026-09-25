@@ -24,6 +24,8 @@ for ((index = 0; index < count; ++index)); do
 done
 printf '    availability: { restart: always }\n\n'
 for ((index = 0; index < count; ++index)); do
+  # Only a ROS vehicle talks DDS; synthetic and MAVLink vehicles need no agent.
+  synthetic "$index" && continue
   mavlink "$index" && continue
   printf '  xrce-px4-%s:\n    command: ./scripts/process/xrce-agent.sh %s\n' "$index" "$index"
   printf '    availability: { restart: always }\n'
