@@ -19,6 +19,10 @@ sim_init() {
   SIM_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
   : "${SIM_SCENARIO_FILE:=$SIM_ROOT/scenarios/mvp-two-px4.env}"
   [[ -r "$SIM_SCENARIO_FILE" ]] || die "scenario not readable: $SIM_SCENARIO_FILE"
+  # The synthetic range is the scenario's alone. down.sh and status.sh run
+  # sim_init for every scenario from one shell, and a value an earlier scenario
+  # set would otherwise stand in for one this scenario leaves out.
+  unset SIM_SYNTHETIC_FLEET SIM_SYNTHETIC_VEHICLE_COUNT SIM_SYNTHETIC_START_INDEX
   # shellcheck disable=SC1090
   source "$SIM_SCENARIO_FILE"
   : "${SIM_PX4_ROOT:=$(sim_dep PX4-Autopilot)}"
