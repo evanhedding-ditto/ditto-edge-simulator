@@ -71,7 +71,7 @@ struct Client {
   bool keyed{};  // a keyframe has gone out since PLAY; frames before one cannot decode
   bool tcp{true};
   std::uint8_t channel{};
-  sockaddr_in rtp_to{};
+  sockaddr_in6 rtp_to{};
   std::uint16_t sequence{};
   bool dead{};
 };
@@ -140,16 +140,25 @@ void nonblocking(const int fd)
   if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) throw std::runtime_error("fcntl failed");
 }
 
+/// Numeric text for an address on a dual-stack socket; IPv4 loses its "::ffff:".
+std::string host_text(const in6_addr & address)
+{
+  char text[INET6_ADDRSTRLEN] = "::";
+  inet_ntop(AF_INET6, &address, text, sizeof(text));
+  return IN6_IS_ADDR_V4MAPPED(&address) ? text + 7 : text;
+}
+
+// Dual-stack, IPv6 as well as IPv4, since a phone hotspot may give the Mac IPv6 alone.
 int open_socket(const int type, const std::uint16_t port)
 {
-  const int fd = socket(AF_INET, type, 0);
+  const int fd = socket(AF_INET6, type, 0);
   if (fd < 0) throw std::runtime_error("socket failed");
-  const int on = 1;
+  const int on = 1, off = 0;
   setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
-  sockaddr_in local{};
-  local.sin_family = AF_INET;
-  local.sin_addr.s_addr = htonl(INADDR_ANY);
-  local.sin_port = htons(port);
+  setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof(off));
+  sockaddr_in6 local{};
+  local.sin6_family = AF_INET6;
+  local.sin6_port = htons(port);
   if (bind(fd, reinterpret_cast<const sockaddr *>(&local), sizeof(local)) < 0 ||
     (type == SOCK_STREAM && listen(fd, 8) < 0))
   {
@@ -518,17 +527,17 @@ struct Feeds::Impl {
     if (index < 0) return reply("404 Not Found");
     const Stream & stream = *streams[static_cast<std::size_t>(index)];
     if (method == "DESCRIBE") {
-      sockaddr_in local{};
+      sockaddr_in6 local{};
       socklen_t size = sizeof(local);
-      char host[INET_ADDRSTRLEN] = "0.0.0.0";
-      if (getsockname(client.fd, reinterpret_cast<sockaddr *>(&local), &size) == 0) {
-        inet_ntop(AF_INET, &local.sin_addr, host, sizeof(host));
-      }
+      const bool named = getsockname(client.fd, reinterpret_cast<sockaddr *>(&local), &size) == 0;
+      const bool ip4 = !named || IN6_IS_ADDR_V4MAPPED(&local.sin6_addr);
+      const std::string host = named ? host_text(local.sin6_addr) : "0.0.0.0";
+      const std::string family = ip4 ? "IN IP4 " : "IN IP6 ";
       char profile[7];
       std::snprintf(profile, sizeof(profile), "%02X%02X%02X", static_cast<unsigned char>(stream.sps[1]),
         static_cast<unsigned char>(stream.sps[2]), static_cast<unsigned char>(stream.sps[3]));
-      const std::string sdp = "v=0\r\no=- " + std::to_string(stream.ssrc) + " 1 IN IP4 " + host + "\r\ns=" +
-        stream.name + "\r\nc=IN IP4 0.0.0.0\r\nt=0 0\r\na=control:*\r\nm=video 0 RTP/AVP 96\r\n"
+      const std::string sdp = "v=0\r\no=- " + std::to_string(stream.ssrc) + " 1 " + family + host + "\r\ns=" +
+        stream.name + "\r\nc=" + family + (ip4 ? "0.0.0.0" : "::") + "\r\nt=0 0\r\na=control:*\r\nm=video 0 RTP/AVP 96\r\n"
         "a=rtpmap:96 H264/90000\r\na=fmtp:96 packetization-mode=1;profile-level-id=" + profile +
         ";sprop-parameter-sets=" + base64(stream.sps) + "," + base64(stream.pps) + "\r\n"
         "a=framerate:" + std::to_string(Feeds::kFps) + "\r\na=control:track0\r\n";
@@ -547,14 +556,14 @@ struct Feeds::Impl {
     } else {
       const std::size_t at = transport.find("client_port=");
       const unsigned long client_port = at == std::string::npos ? 0 : std::strtoul(transport.c_str() + at + 12, nullptr, 10);
-      sockaddr_in peer{};
+      sockaddr_in6 peer{};
       socklen_t size = sizeof(peer);
       if (client_port == 0 || client_port > 65534 || transport.find("multicast") != std::string::npos ||
         getpeername(client.fd, reinterpret_cast<sockaddr *>(&peer), &size) != 0)
       {
         return reply("461 Unsupported Transport");
       }
-      peer.sin_port = htons(static_cast<std::uint16_t>(client_port));
+      peer.sin6_port = htons(static_cast<std::uint16_t>(client_port));
       client.tcp = false;
       client.rtp_to = peer;
       answer = "RTP/AVP;unicast;client_port=" + std::to_string(client_port) + "-" + std::to_string(client_port + 1) +
@@ -609,7 +618,7 @@ struct Feeds::Impl {
   void accept_clients()
   {
     for (;;) {
-      sockaddr_in peer{};
+      sockaddr_in6 peer{};
       socklen_t size = sizeof(peer);
       const int fd = accept(listener, reinterpret_cast<sockaddr *>(&peer), &size);
       if (fd < 0) return;
@@ -637,9 +646,8 @@ struct Feeds::Impl {
       client.fd = fd;
       client.sequence = static_cast<std::uint16_t>(random());
       clients.push_back(std::move(client));
-      char host[INET_ADDRSTRLEN] = {};
-      inet_ntop(AF_INET, &peer.sin_addr, host, sizeof(host));
-      TraceLog(LOG_INFO, "video: RTSP client %s:%u connected", host, ntohs(peer.sin_port));
+      TraceLog(LOG_INFO, "video: RTSP client %s:%u connected", host_text(peer.sin6_addr).c_str(),
+        ntohs(peer.sin6_port));
     }
   }
 

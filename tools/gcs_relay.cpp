@@ -87,15 +87,23 @@ void nonblocking(const int fd)
   if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) fail("fcntl");
 }
 
-int open_socket(const int type, const std::uint32_t host, const std::uint16_t port)
+// TCP listens on every address, IPv6 as well as IPv4, since a phone hotspot may
+// give the Mac IPv6 alone; UDP talks to PX4 on loopback only.
+int open_socket(const int type, const std::uint16_t port)
 {
-  const int fd = socket(AF_INET, type, 0);
+  const bool stream = type == SOCK_STREAM;
+  const int fd = socket(stream ? AF_INET6 : AF_INET, type, 0);
   if (fd < 0) fail("socket");
-  const int on = 1;
+  const int on = 1, off = 0;
   setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
-  const sockaddr_in local = address(host, port);
-  if (bind(fd, reinterpret_cast<const sockaddr *>(&local), sizeof(local)) < 0) fail("bind");
-  if (type == SOCK_STREAM && listen(fd, 4) < 0) fail("listen");
+  sockaddr_in6 any{};
+  any.sin6_family = AF_INET6;
+  any.sin6_port = htons(port);
+  const sockaddr_in loopback = address(INADDR_LOOPBACK, port);
+  if (stream && setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof(off)) < 0) fail("IPV6_V6ONLY");
+  if ((stream ? bind(fd, reinterpret_cast<const sockaddr *>(&any), sizeof(any)) :
+      bind(fd, reinterpret_cast<const sockaddr *>(&loopback), sizeof(loopback))) < 0) fail("bind");
+  if (stream && listen(fd, 4) < 0) fail("listen");
   nonblocking(fd);
   return fd;
 }
@@ -165,15 +173,16 @@ void drop(Link & link, const std::size_t index, const char * why)
 void accept_clients(Link & link)
 {
   for (;;) {
-    sockaddr_in peer{};
+    sockaddr_in6 peer{};
     socklen_t size = sizeof(peer);
     const int fd = accept(link.listener, reinterpret_cast<sockaddr *>(&peer), &size);
     if (fd < 0) return;
     configure_client(fd);
     if (link.clients.size() == kMaxClients) drop(link, 0, "replaced by a newer station");
-    char text[INET_ADDRSTRLEN] = {};
-    inet_ntop(AF_INET, &peer.sin_addr, text, sizeof(text));
-    link.clients.push_back({fd, std::string(text) + ":" + std::to_string(ntohs(peer.sin_port)), {}, {}});
+    char text[INET6_ADDRSTRLEN] = {};
+    inet_ntop(AF_INET6, &peer.sin6_addr, text, sizeof(text));
+    const char * host = IN6_IS_ADDR_V4MAPPED(&peer.sin6_addr) ? text + 7 : text;  // past "::ffff:"
+    link.clients.push_back({fd, std::string(host) + ":" + std::to_string(ntohs(peer.sin6_port)), {}, {}});
     std::printf("[gcs] %s: %s connected (%zu total)\n", link.vehicle.c_str(), link.clients.back().peer.c_str(),
       link.clients.size());
   }
@@ -218,8 +227,8 @@ int main(int argc, char ** argv)
   std::signal(SIGINT, [](int) { stopping = 1; });
   std::signal(SIGTERM, [](int) { stopping = 1; });
   for (auto & link : links) {
-    link.listener = open_socket(SOCK_STREAM, INADDR_ANY, link.port);
-    link.udp = open_socket(SOCK_DGRAM, INADDR_LOOPBACK, link.port);
+    link.listener = open_socket(SOCK_STREAM, link.port);
+    link.udp = open_socket(SOCK_DGRAM, link.port);
     std::printf("[gcs] %s: TCP %u -> PX4 UDP %u\n", link.vehicle.c_str(), link.port, ntohs(link.px4.sin_port));
   }
 
