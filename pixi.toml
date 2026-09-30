@@ -20,6 +20,7 @@ nlohmann_json = ">=3.12,<4"
 # The build tools too, so nothing at all is taken from Homebrew.
 cmake = ">=3.31,<5"
 ninja = "*"
+gettext = ">=0.25.1,<0.26"
 
 # ROS 2, colcon, and the Fast DDS runtime the XRCE agent links against. Required
 # only by scenarios that declare ROS vehicles: mvp-two-px4, mvp-four-mixed,

@@ -15,15 +15,24 @@ environments:
       - conda: https://prefix.dev/conda-forge/osx-arm64/bzip2-1.0.8-h4e30115_10.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/c-ares-1.34.8-h74c22ad_2.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/cmake-4.4.3-hf91ab31_0.conda
+      - conda: https://prefix.dev/conda-forge/osx-arm64/gettext-0.25.1-hae62183_2.conda
+      - conda: https://prefix.dev/conda-forge/osx-arm64/gettext-tools-0.25.1-hae62183_2.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/icu-78.3-py310h579977c_2.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/krb5-1.22.2-h34f8a20_2.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/libabseil-20260526.0-cxx17_h4c27e2a_2.conda
+      - conda: https://prefix.dev/conda-forge/osx-arm64/libasprintf-0.25.1-hae62183_2.conda
+      - conda: https://prefix.dev/conda-forge/osx-arm64/libasprintf-devel-0.25.1-hae62183_2.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/libcurl-8.22.0-h6651222_0.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/libcxx-23.1.1-h55c6f16_0.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/libedit-3.1.20250104-pl5321h26f1114_1.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/libev-4.33-h1a92334_3.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/libexpat-2.8.4-h6111c0a_0.conda
+      - conda: https://prefix.dev/conda-forge/osx-arm64/libgettextpo-0.25.1-hae62183_2.conda
+      - conda: https://prefix.dev/conda-forge/osx-arm64/libgettextpo-devel-0.25.1-hae62183_2.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/libgrpc-1.83.1-h74070d8_1.conda
+      - conda: https://prefix.dev/conda-forge/osx-arm64/libiconv-1.18-he4c29f2_3.conda
+      - conda: https://prefix.dev/conda-forge/osx-arm64/libintl-0.25.1-hae62183_2.conda
+      - conda: https://prefix.dev/conda-forge/osx-arm64/libintl-devel-0.25.1-hae62183_2.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/liblzma-5.8.3-h8088a28_1.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/libnghttp2-1.68.1-h435687b_1.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/libprotobuf-7.35.1-h391e224_3.conda
@@ -208,8 +217,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/osx-arm64/fribidi-1.0.17-hb001647_0.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/frozenlist-1.8.0-py312ha0ce254_0.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/gdk-pixbuf-2.44.8-h5867e2c_2.conda
-      - conda: https://prefix.dev/conda-forge/osx-arm64/gettext-0.25.1-h3dcc1bd_0.conda
-      - conda: https://prefix.dev/conda-forge/osx-arm64/gettext-tools-0.25.1-h493aca8_0.conda
+      - conda: https://prefix.dev/conda-forge/osx-arm64/gettext-0.25.1-hae62183_2.conda
+      - conda: https://prefix.dev/conda-forge/osx-arm64/gettext-tools-0.25.1-hae62183_2.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/git-2.55.0-pl5321h66f49b9_3.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/glew-2.3.0-hf163413_0.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/glib-2.90.0-h37000cc_0.conda
@@ -246,8 +255,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/osx-arm64/lerc-4.2.0-h1eee2c3_0.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/libabseil-20260526.0-cxx17_h4c27e2a_2.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/libaec-1.1.5-h8664d51_0.conda
-      - conda: https://prefix.dev/conda-forge/osx-arm64/libasprintf-0.25.1-h493aca8_0.conda
-      - conda: https://prefix.dev/conda-forge/osx-arm64/libasprintf-devel-0.25.1-h493aca8_0.conda
+      - conda: https://prefix.dev/conda-forge/osx-arm64/libasprintf-0.25.1-hae62183_2.conda
+      - conda: https://prefix.dev/conda-forge/osx-arm64/libasprintf-devel-0.25.1-hae62183_2.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/libass-0.17.5-h0a551c8_1.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/libavif16-1.4.2-hfc01230_4.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/libblas-3.11.0-11_h51639a9_openblas.conda
@@ -277,8 +286,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/osx-arm64/libfreetype6-2.14.3-h2ed5691_2.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/libgcc-16.2.0-h3cf6597_5.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/libgd-2.3.3-h05bcc79_12.conda
-      - conda: https://prefix.dev/conda-forge/osx-arm64/libgettextpo-0.25.1-h493aca8_0.conda
-      - conda: https://prefix.dev/conda-forge/osx-arm64/libgettextpo-devel-0.25.1-h493aca8_0.conda
+      - conda: https://prefix.dev/conda-forge/osx-arm64/libgettextpo-0.25.1-hae62183_2.conda
+      - conda: https://prefix.dev/conda-forge/osx-arm64/libgettextpo-devel-0.25.1-hae62183_2.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/libgfortran-16.2.0-h07b0088_5.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/libgfortran5-16.2.0-hdb7a957_5.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/libglib-2.90.0-hccd281b_0.conda
@@ -292,8 +301,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/osx-arm64/libhwloc-2.13.0-default_ha97f43a_1000.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/libhwy-1.4.0-hd2bdd19_1.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/libiconv-1.18-he4c29f2_3.conda
-      - conda: https://prefix.dev/conda-forge/osx-arm64/libintl-0.25.1-h493aca8_0.conda
-      - conda: https://prefix.dev/conda-forge/osx-arm64/libintl-devel-0.25.1-h493aca8_0.conda
+      - conda: https://prefix.dev/conda-forge/osx-arm64/libintl-0.25.1-hae62183_2.conda
+      - conda: https://prefix.dev/conda-forge/osx-arm64/libintl-devel-0.25.1-hae62183_2.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/libjpeg-turbo-3.2.0-h84a0fba_1.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/libjxl-0.12.0-hb71b141_2.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/liblapack-3.11.0-11_hd9741b5_openblas.conda
@@ -2851,40 +2860,40 @@ packages:
     - gdk-pixbuf >=2.44.8,<3.0a0
   size: 552802
   timestamp: 1788490405006
-- conda: https://prefix.dev/conda-forge/osx-arm64/gettext-0.25.1-h3dcc1bd_0.conda
-  sha256: 129a81e9da9f60ae6955b49938447e7faeb7e1be815b2db99e76956dddf8c392
-  md5: 7059ba83fd98707b2cd9a5f06f589dd4
+- conda: https://prefix.dev/conda-forge/osx-arm64/gettext-0.25.1-hae62183_2.conda
+  sha256: 3fc8894ff775be3464117e0bce1fa9feabdb1731fc0b983d86af80fdf69b09d3
+  md5: f8f7c4650eb27be5441c36ca7868cd69
   depends:
   - __osx >=11.0
-  - gettext-tools 0.25.1 h493aca8_0
-  - libasprintf 0.25.1 h493aca8_0
-  - libasprintf-devel 0.25.1 h493aca8_0
-  - libcxx >=18
-  - libgettextpo 0.25.1 h493aca8_0
-  - libgettextpo-devel 0.25.1 h493aca8_0
+  - gettext-tools 0.25.1 hae62183_2
+  - libasprintf 0.25.1 hae62183_2
+  - libasprintf-devel 0.25.1 hae62183_2
+  - libcxx >=21
+  - libgettextpo 0.25.1 hae62183_2
+  - libgettextpo-devel 0.25.1 hae62183_2
   - libiconv >=1.18,<2.0a0
-  - libintl 0.25.1 h493aca8_0
-  - libintl-devel 0.25.1 h493aca8_0
+  - libintl 0.25.1 hae62183_2
+  - libintl-devel 0.25.1 hae62183_2
   license: LGPL-2.1-or-later AND GPL-3.0-or-later
   run_exports:
     weak:
     - libintl >=0.25.1,<1.0a0
     - libasprintf >=0.25.1,<1.0a0
     - libgettextpo >=0.25.1,<1.0a0
-  size: 543276
-  timestamp: 1751558682952
-- conda: https://prefix.dev/conda-forge/osx-arm64/gettext-tools-0.25.1-h493aca8_0.conda
-  sha256: e8dd68706676d5b6f6ee09240936a0ecd1ae12b87dbb37e4c4be263e332ab125
-  md5: 817042c017930497931da6aa04a47f09
+  size: 556261
+  timestamp: 1790118879074
+- conda: https://prefix.dev/conda-forge/osx-arm64/gettext-tools-0.25.1-hae62183_2.conda
+  sha256: 1e2fa4c23fc1827eb0ad986690efade65b63a165ff8a59d32cdaa04f824e3a1c
+  md5: 7df4cdd6e82f32fc964f2c21aea04046
   depends:
   - __osx >=11.0
   - libiconv >=1.18,<2.0a0
-  - libintl 0.25.1 h493aca8_0
+  - libintl 0.25.1 hae62183_2
   license: GPL-3.0-or-later
   license_family: GPL
   run_exports: {}
-  size: 3748044
-  timestamp: 1751558602508
+  size: 3712439
+  timestamp: 1790118807342
 - conda: https://prefix.dev/conda-forge/osx-arm64/git-2.55.0-pl5321h66f49b9_3.conda
   sha256: a10bbb7fcf02454996776c30bb982aaa23639a017bc7c4f81bf731ad4c61b7d5
   md5: abb378b62fe5a58421a8df98e7ddad85
@@ -3424,30 +3433,30 @@ packages:
     - libaec >=1.1.5,<2.0a0
   size: 30390
   timestamp: 1769222133373
-- conda: https://prefix.dev/conda-forge/osx-arm64/libasprintf-0.25.1-h493aca8_0.conda
-  sha256: 7265547424e978ea596f51cc8e7b81638fb1c660b743e98cc4deb690d9d524ab
-  md5: 0deb80a2d6097c5fb98b495370b2435b
+- conda: https://prefix.dev/conda-forge/osx-arm64/libasprintf-0.25.1-hae62183_2.conda
+  sha256: af6e0e598ace7cdac145daec66c39916016ebcd4d960246b5e90c4247e47be52
+  md5: fa3b4ff4b5cbde3a77824949f5d0b1ef
   depends:
   - __osx >=11.0
-  - libcxx >=18
+  - libcxx >=21
   license: LGPL-2.1-or-later
   run_exports:
     weak:
     - libasprintf >=0.25.1,<1.0a0
-  size: 52316
-  timestamp: 1751558366611
-- conda: https://prefix.dev/conda-forge/osx-arm64/libasprintf-devel-0.25.1-h493aca8_0.conda
-  sha256: fc76b07620eabde52928c69bcdcb5497da3fdad3331a76f9d4bffeb27e0bdd8f
-  md5: c18067d2d5864e77f84456d97c1c17cc
+  size: 52487
+  timestamp: 1790118662123
+- conda: https://prefix.dev/conda-forge/osx-arm64/libasprintf-devel-0.25.1-hae62183_2.conda
+  sha256: ef7015ab576a01b3c65591cc14daded4002c9f1138c4ca95f5a059baf181ba79
+  md5: 63b67bfd0038e4e4b56f4ffae33f2bcc
   depends:
   - __osx >=11.0
-  - libasprintf 0.25.1 h493aca8_0
+  - libasprintf 0.25.1 hae62183_2
   license: LGPL-2.1-or-later
   run_exports:
     weak:
     - libasprintf >=0.25.1,<1.0a0
-  size: 35256
-  timestamp: 1751558418167
+  size: 36411
+  timestamp: 1790118687849
 - conda: https://prefix.dev/conda-forge/osx-arm64/libass-0.17.5-h0a551c8_1.conda
   sha256: 2ef900bd889e111a40d2c57e3611be9e89b3e6195c01f45c7f9c3e0a72ea9d50
   md5: 690e28551ab3c77d44c9bdaa477d7326
@@ -3870,35 +3879,35 @@ packages:
     - libgd >=2.3.3,<2.4.0a0
   size: 159247
   timestamp: 1766331953491
-- conda: https://prefix.dev/conda-forge/osx-arm64/libgettextpo-0.25.1-h493aca8_0.conda
-  sha256: 3ba35ff26b3b9573b5df5b9bbec5c61476157ec3a9f12c698e2a9350cd4338fd
-  md5: 98acd9989d0d8d5914ccc86dceb6c6c2
+- conda: https://prefix.dev/conda-forge/osx-arm64/libgettextpo-0.25.1-hae62183_2.conda
+  sha256: ea81b8992214e8c4cd289ba4b9092004aa941ddb12900a32cfbc28be6d3156ff
+  md5: 93e3f213a8e3fa21fb7b1407d6a4cd44
   depends:
   - __osx >=11.0
   - libiconv >=1.18,<2.0a0
-  - libintl 0.25.1 h493aca8_0
+  - libintl 0.25.1 hae62183_2
   license: GPL-3.0-or-later
   license_family: GPL
   run_exports:
     weak:
     - libgettextpo >=0.25.1,<1.0a0
-  size: 183091
-  timestamp: 1751558452316
-- conda: https://prefix.dev/conda-forge/osx-arm64/libgettextpo-devel-0.25.1-h493aca8_0.conda
-  sha256: 976941e18f879e5c1e67553f9657f7bb9d3935c89014ebfeafe89dcfba2de9e7
-  md5: 91c2fdde1cb4a61b5cb7afa682af359e
+  size: 182332
+  timestamp: 1790118703147
+- conda: https://prefix.dev/conda-forge/osx-arm64/libgettextpo-devel-0.25.1-hae62183_2.conda
+  sha256: ade9ccfd1f85c5b207cdedcdd8f5acdad3cbc2ea03770e8c4a823ea404aef978
+  md5: 6d00a561ccbafb83af7668ca061b253c
   depends:
   - __osx >=11.0
-  - libgettextpo 0.25.1 h493aca8_0
+  - libgettextpo 0.25.1 hae62183_2
   - libiconv >=1.18,<2.0a0
-  - libintl 0.25.1 h493aca8_0
+  - libintl 0.25.1 hae62183_2
   license: GPL-3.0-or-later
   license_family: GPL
   run_exports:
     weak:
     - libgettextpo >=0.25.1,<1.0a0
-  size: 37894
-  timestamp: 1751558502415
+  size: 39203
+  timestamp: 1790118727083
 - conda: https://prefix.dev/conda-forge/osx-arm64/libgfortran-16.2.0-h07b0088_5.conda
   sha256: 8afe97e015b025e71823d8195da6b97c9177b0dedc2d5072fe15ec0f39086f25
   md5: 592ca0c6b8c4e1952fc28dbec011a86b
@@ -4099,9 +4108,9 @@ packages:
     - libiconv >=1.18,<2.0a0
   size: 750816
   timestamp: 1787033961086
-- conda: https://prefix.dev/conda-forge/osx-arm64/libintl-0.25.1-h493aca8_0.conda
-  sha256: 99d2cebcd8f84961b86784451b010f5f0a795ed1c08f1e7c76fbb3c22abf021a
-  md5: 5103f6a6b210a3912faf8d7db516918c
+- conda: https://prefix.dev/conda-forge/osx-arm64/libintl-0.25.1-hae62183_2.conda
+  sha256: b43c6645e668f86d04d5c06d6dc17efe921bbd9244be4b77946d56fb950a3fcc
+  md5: a3a4193101bc5427e6cf8be81d5eeddf
   depends:
   - __osx >=11.0
   - libiconv >=1.18,<2.0a0
@@ -4109,21 +4118,21 @@ packages:
   run_exports:
     weak:
     - libintl >=0.25.1,<1.0a0
-  size: 90957
-  timestamp: 1751558394144
-- conda: https://prefix.dev/conda-forge/osx-arm64/libintl-devel-0.25.1-h493aca8_0.conda
-  sha256: 5a446cb0501d87e0816da0bce524c60a053a4cf23c94dfd3e2b32a8499009e36
-  md5: 5f9888e1cdbbbef52c8cf8b567393535
+  size: 90024
+  timestamp: 1790118675563
+- conda: https://prefix.dev/conda-forge/osx-arm64/libintl-devel-0.25.1-hae62183_2.conda
+  sha256: 99432d75dd5df8a592b76545a31d604d8e0332660aa27e2c8769857f246c6b44
+  md5: 88a498f724dacf25a308a6873f066769
   depends:
   - __osx >=11.0
   - libiconv >=1.18,<2.0a0
-  - libintl 0.25.1 h493aca8_0
+  - libintl 0.25.1 hae62183_2
   license: LGPL-2.1-or-later
   run_exports:
     weak:
     - libintl >=0.25.1,<1.0a0
-  size: 40340
-  timestamp: 1751558481257
+  size: 41844
+  timestamp: 1790118714457
 - conda: https://prefix.dev/conda-forge/osx-arm64/libjpeg-turbo-3.2.0-h84a0fba_1.conda
   sha256: 05006418f9392c9b723e8428808db106de0350a497832f95f921b85ff1072310
   md5: b2f8c8e5a7651a1d7c05404c3a159517
