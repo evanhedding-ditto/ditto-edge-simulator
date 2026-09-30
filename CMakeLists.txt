@@ -21,8 +21,10 @@ find_package(raylib 6.0 QUIET)
 if(NOT raylib_FOUND)
   include(FetchContent)
   FetchContent_Declare(raylib
-    GIT_REPOSITORY https://github.com/raysan5/raylib.git
-    GIT_TAG 6.0)
+    # The release tarball, 50 MB; a git clone, even a shallow one, is ~400 MB.
+    URL https://github.com/raysan5/raylib/archive/refs/tags/6.0.tar.gz
+    URL_HASH SHA256=2b3ee1e2120c7a0796b33062c7e9a694dd8a8caa56a96319ac8c8ecf54a90d0b
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
   set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
   FetchContent_MakeAvailable(raylib)
 endif()
