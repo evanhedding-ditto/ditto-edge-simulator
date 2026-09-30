@@ -320,9 +320,11 @@ struct IsrTarget {
   float north_m{}, east_m{}, surface_m{};
   bool found{};
   bool surface_ready{true};
-  Vehicle robot;  // a standing factory robot, drawn by draw_robot
+  Vehicle robot;  // a standing factory robot, drawn by draw_target
+  // A quarter over factory size, 2 m tall, so a target reads from altitude.
+  static constexpr float kScale = 1.25F;
   Vector3 base() const { return sim::world::view_point(east_m, surface_m, north_m); }
-  Vector3 center() const { return sim::world::view_point(east_m, surface_m + 0.8F, north_m); }
+  Vector3 center() const { return sim::world::view_point(east_m, surface_m + 0.8F * kScale, north_m); }
 };
 
 std::vector<IsrTarget> read_isr_targets(const std::string & path)
@@ -364,19 +366,20 @@ std::optional<TargetBox> projected_target(const IsrTarget & target, const Camera
     return std::nullopt;
   Vector2 low{static_cast<float>(width), static_cast<float>(height)};
   Vector2 high{0.0F, 0.0F};
-  // The robot's bounds: 1.6 m tall and, with its arms out, 0.7 m across.
+  // The robot's bounds: 1.6 m tall and, with its arms out, 0.7 m across, at factory size.
   for (const float x : {-0.35F, 0.35F}) for (const float y : {0.0F, 1.6F})
     for (const float z : {-0.35F, 0.35F}) {
-      const Vector3 corner = Vector3Add(target.base(), {x, y, z});
+      const Vector3 corner = Vector3Add(target.base(), Vector3Scale({x, y, z}, IsrTarget::kScale));
       if (Vector3DotProduct(Vector3Subtract(corner, camera.position), forward) <= 0.0F)
         return std::nullopt;
       const Vector2 pixel = GetWorldToScreenEx(corner, camera, width, height);
       low.x = std::min(low.x, pixel.x); low.y = std::min(low.y, pixel.y);
       high.x = std::max(high.x, pixel.x); high.y = std::max(high.y, pixel.y);
     }
-  // Recognized once 12 pixels tall, as a 1.6 m robot is at 100 m; the drawn box
-  // then stands clear of it rather than hugging it.
-  if (low.x < 0 || low.y < 0 || high.x >= width || high.y >= height || high.y - low.y < 12.0F)
+  // Recognized once as tall as it is at 100 m; the drawn box then stands clear
+  // of it rather than hugging it.
+  if (low.x < 0 || low.y < 0 || high.x >= width || high.y >= height ||
+    high.y - low.y < 12.0F * IsrTarget::kScale)
     return std::nullopt;
   const float pad = std::max(10.0F, 0.35F * (high.y - low.y));
   return TargetBox{{low.x - pad, low.y - pad, high.x - low.x + 2.0F * pad, high.y - low.y + 2.0F * pad}, distance};
@@ -852,6 +855,16 @@ void draw_robot(const Vehicle & vehicle, const Vector3 center, const float gait)
   // Status, on the chest where it stays visible from every angle.
   DrawSphere(at(1.22F + bob, 0.15F, 0.0F), 0.055F,
     vehicle.failsafe ? RED : (vehicle.armed ? LIME : LIGHTGRAY));
+}
+
+void draw_target(const IsrTarget & target)
+{
+  const Vector3 base = target.base();
+  rlPushMatrix();
+  rlTranslatef(base.x, base.y, base.z);
+  rlScalef(IsrTarget::kScale, IsrTarget::kScale, IsrTarget::kScale);
+  draw_robot(target.robot, {}, 0.0F);
+  rlPopMatrix();
 }
 
 std::int64_t unix_time_ms()
@@ -1762,7 +1775,7 @@ int main(int argc, char ** argv)
         }
       }
       for (std::size_t i = 0; i < active_targets; ++i) if (const auto & target = isr_targets[i]; target.surface_ready) {
-        draw_robot(target.robot, target.base(), 0.0F);
+        draw_target(target);
       }
       EndMode3D();
       for (const auto & [target_index, box] : recognized) {
@@ -1800,7 +1813,7 @@ int main(int argc, char ** argv)
     BeginMode3D(camera);
     draw_scenery(0, camera.position);
     for (std::size_t i = 0; i < active_targets; ++i) if (const auto & target = isr_targets[i]; target.surface_ready) {
-      draw_robot(target.robot, target.base(), 0.0F);
+      draw_target(target);
     }
     for (const auto & [id, vehicle] : visible) {
       const Vector3 position = sim::world::view_point(vehicle.east_m, -vehicle.down_m, vehicle.north_m);
