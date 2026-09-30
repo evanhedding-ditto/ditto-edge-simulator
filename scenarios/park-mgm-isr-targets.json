@@ -1,0 +1,9 @@
+{
+  "name": "Park MGM ISR targets — layout 1",
+  "targets": [
+    {"id": "target-1", "site": "Las Vegas Boulevard north", "kind": "road", "north_m": 80, "east_m": 0, "surface_hint_m": 0},
+    {"id": "target-2", "site": "east rooftop", "kind": "roof", "north_m": 40, "east_m": 150, "surface_hint_m": 38},
+    {"id": "target-3", "site": "southwest rooftop", "kind": "roof", "north_m": -200, "east_m": -300, "surface_hint_m": 26},
+    {"id": "target-4", "site": "southern boulevard", "kind": "road", "north_m": -200, "east_m": 0, "surface_hint_m": 0}
+  ]
+}

@@ -4,11 +4,13 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <csignal>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
+#include <deque>
 #include <exception>
 #include <fstream>
 #include <mutex>
@@ -16,9 +18,11 @@
 #include <optional>
 #include <fcntl.h>
 #include <poll.h>
+#include <spawn.h>
 #include <stdexcept>
 #include <string>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <thread>
 #include <unordered_map>
 #include <unistd.h>
@@ -28,8 +32,11 @@
 #include <raylib.h>
 #include <raymath.h>
 #include <rlgl.h>
+#define GL_SILENCE_DEPRECATION
+#include <OpenGL/gl3.h>
 
 #include <ditto/observer/client.hpp>
+#include <ditto/edge/client.hpp>
 
 #include <mavlink/common/mavlink.h>
 
@@ -40,6 +47,8 @@
 #ifdef DITTO_CESIUM_VIEWER
 #include "raylib_tileset.hpp"
 #endif
+
+extern char **environ;
 
 namespace
 {
@@ -80,7 +89,7 @@ struct Snapshot {
 };
 
 struct Source {
-  Source(std::string vehicle_id, const std::uint16_t port) : vehicle{std::move(vehicle_id)} {
+  Source(std::string vehicle_id, const std::uint16_t port) : vehicle{std::move(vehicle_id)}, telemetry_port(port) {
     fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) throw std::runtime_error("could not create PX4 telemetry socket");
     const int flags = fcntl(fd, F_GETFL, 0);
@@ -101,11 +110,14 @@ struct Source {
   Source(const Source &) = delete;
   Source & operator=(const Source &) = delete;
   Source(Source && other) noexcept
-  : vehicle(std::move(other.vehicle)), parser_buffer(other.parser_buffer), parser_status(other.parser_status),
+  : vehicle(std::move(other.vehicle)), telemetry_port(other.telemetry_port), gcs_port(other.gcs_port),
+    parser_buffer(other.parser_buffer), parser_status(other.parser_status),
     fd(std::exchange(other.fd, -1)) {}
   ~Source() { if (fd >= 0) close(fd); }
 
   Vehicle vehicle;
+  std::uint16_t telemetry_port{};
+  std::uint16_t gcs_port{};
   mavlink_message_t parser_buffer{};
   mavlink_status_t parser_status{};
   /// Set once this vehicle has sent LOCAL_POSITION_NED, after which its
@@ -301,6 +313,168 @@ Camera3D nose_camera(const Vehicle & vehicle)
   camera.projection = CAMERA_PERSPECTIVE;
   return camera;
 }
+
+struct IsrTarget {
+  std::string id;
+  std::string site;
+  float north_m{}, east_m{}, surface_m{};
+  bool found{};
+  bool surface_ready{true};
+  Vector3 center() const { return sim::world::view_point(east_m, surface_m + 1.1F, north_m); }
+};
+
+std::vector<IsrTarget> read_isr_targets(const std::string & path)
+{
+  if (path.empty()) return {};
+  std::ifstream input(path);
+  if (!input) throw std::runtime_error("ISR targets file not readable: " + path);
+  const auto document = nlohmann::json::parse(input);
+  std::vector<IsrTarget> targets;
+  for (const auto & entry : document.at("targets")) {
+    IsrTarget target;
+    target.id = entry.at("id").get<std::string>();
+    target.site = entry.at("site").get<std::string>();
+    target.north_m = entry.at("north_m").get<float>();
+    target.east_m = entry.at("east_m").get<float>();
+    target.surface_m = entry.at("surface_hint_m").get<float>();
+    if (target.id.empty() || !std::isfinite(target.north_m) || !std::isfinite(target.east_m) ||
+      !std::isfinite(target.surface_m)) throw std::runtime_error("invalid ISR target in " + path);
+    targets.push_back(std::move(target));
+  }
+  return targets;
+}
+
+struct TargetBox { Rectangle pixels; float distance_m; };
+struct OcclusionSample { Clock::time_point checked{}; bool clear{}; };
+
+std::optional<TargetBox> projected_target(const IsrTarget & target, const Camera3D & camera,
+  const int width, const int height)
+{
+  const Vector3 center = target.center();
+  const Vector3 forward = Vector3Normalize(Vector3Subtract(camera.target, camera.position));
+  const Vector3 to_target = Vector3Subtract(center, camera.position);
+  const float distance = Vector3Length(to_target);
+  if (distance > 100.0F || distance < 2.0F || Vector3DotProduct(to_target, forward) <= 0.0F)
+    return std::nullopt;
+  Vector2 low{static_cast<float>(width), static_cast<float>(height)};
+  Vector2 high{0.0F, 0.0F};
+  for (const float x : {-1.1F, 1.1F}) for (const float y : {-1.1F, 1.1F})
+    for (const float z : {-1.1F, 1.1F}) {
+      const Vector3 corner = Vector3Add(center, {x, y, z});
+      if (Vector3DotProduct(Vector3Subtract(corner, camera.position), forward) <= 0.0F)
+        return std::nullopt;
+      const Vector2 pixel = GetWorldToScreenEx(corner, camera, width, height);
+      low.x = std::min(low.x, pixel.x); low.y = std::min(low.y, pixel.y);
+      high.x = std::max(high.x, pixel.x); high.y = std::max(high.y, pixel.y);
+    }
+  if (low.x < 0 || low.y < 0 || high.x >= width || high.y >= height ||
+    high.x - low.x < 18.0F || high.y - low.y < 18.0F) return std::nullopt;
+  return TargetBox{{low.x, low.y, high.x - low.x, high.y - low.y}, distance};
+}
+
+bool target_unoccluded(const IsrTarget & target, const Camera3D & camera, const int width, const int height)
+{
+  const Vector2 pixel = GetWorldToScreenEx(target.center(), camera, width, height);
+  const int x = static_cast<int>(pixel.x), y = height - 1 - static_cast<int>(pixel.y);
+  if (x < 0 || x >= width || y < 0 || y >= height) return false;
+  rlDrawRenderBatchActive();
+  float depth = 1.0F;
+  glReadPixels(x, y, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &depth);
+  if (depth >= 1.0F) return false;
+  const double near = rlGetCullDistanceNear(), far = rlGetCullDistanceFar();
+  const double scene_m = near * far / (far - depth * (far - near));
+  const Vector3 forward = Vector3Normalize(Vector3Subtract(camera.target, camera.position));
+  const float target_m = Vector3DotProduct(Vector3Subtract(target.center(), camera.position), forward);
+  return scene_m + 0.75 >= target_m;
+}
+
+class IsrPublisher {
+public:
+  IsrPublisher(std::string socket, std::string scenario, std::string run_id, const double home_latitude,
+    const double home_longitude, const std::vector<IsrTarget> & targets)
+    : socket_(std::move(socket)), scenario_(std::move(scenario)), run_id_(std::move(run_id)),
+      home_latitude_(home_latitude),
+      home_longitude_(home_longitude), worker_([this] { run(); })
+  {
+    for (const auto & target : targets) publish(target, false, "");
+  }
+
+  ~IsrPublisher()
+  {
+    { std::lock_guard<std::mutex> lock(mutex_); stopping_ = true; }
+    ready_.notify_one();
+    worker_.join();
+  }
+
+  void publish(const IsrTarget & target, const bool found, std::string observer)
+  {
+    constexpr double metres_per_degree = 111319.49079327357;
+    nlohmann::json position = nullptr;
+    if (found) position = {
+      {"north_m", target.north_m}, {"east_m", target.east_m}, {"up_m", target.surface_m},
+      {"latitude_deg", home_latitude_ + target.north_m / metres_per_degree},
+      {"longitude_deg", home_longitude_ + target.east_m /
+        (metres_per_degree * std::cos(home_latitude_ * DEG2RAD))}};
+    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count();
+    nlohmann::json document{
+      {"_id", scenario_ + "/" + target.id}, {"schema", "ditto.isr_target.v1"},
+      {"run_id", run_id_}, {"target_id", target.id}, {"site", target.site},
+      {"state", found ? "found" : "unknown"}, {"position", position},
+      {"found_by", found ? observer : ""}, {"updated_unix_ms", now}};
+    { std::lock_guard<std::mutex> lock(mutex_); pending_.push_back(std::move(document)); }
+    ready_.notify_one();
+  }
+
+  bool idle()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return pending_.empty();
+  }
+
+private:
+  void run()
+  {
+    constexpr char query[] = "INSERT INTO isr_targets DOCUMENTS (:doc) ON ID CONFLICT DO UPDATE_LOCAL_DIFF";
+    for (;;) {
+      nlohmann::json document;
+      {
+        std::unique_lock<std::mutex> lock(mutex_);
+        ready_.wait(lock, [this] { return stopping_ || !pending_.empty(); });
+        if (stopping_) return;
+        document = pending_.front();
+      }
+      bool success = false;
+      try {
+        ditto::edge::Client client(socket_, std::string{}, std::chrono::seconds(5));
+        ditto::edge::StoreResult result;
+        const auto status = client.execute(query, nlohmann::json{{"doc", document}}.dump(), result);
+        success = status.ok();
+        if (!success) TraceLog(LOG_WARNING, "ISR target publish failed: %s", status.error_message().c_str());
+        if (success) {
+          const auto positioned = client.execute(
+            "UPDATE isr_targets SET position = :position WHERE _id = :id",
+            nlohmann::json{{"id", document["_id"]}, {"position", document["position"]}}.dump(), result);
+          success = positioned.ok();
+          if (!success) TraceLog(LOG_WARNING, "ISR target position failed: %s", positioned.error_message().c_str());
+        }
+      } catch (const std::exception & error) {
+        TraceLog(LOG_WARNING, "ISR target publish failed: %s", error.what());
+      }
+      std::unique_lock<std::mutex> lock(mutex_);
+      if (success) pending_.pop_front();
+      else ready_.wait_for(lock, std::chrono::seconds(1), [this] { return stopping_; });
+    }
+  }
+
+  std::string socket_, scenario_, run_id_;
+  double home_latitude_{}, home_longitude_{};
+  std::mutex mutex_;
+  std::condition_variable ready_;
+  std::deque<nlohmann::json> pending_;
+  bool stopping_{};
+  std::thread worker_;
+};
 
 /// One vertex of a drone part, built once in the part's own frame.
 struct LitVertex {
@@ -927,9 +1101,19 @@ int main(int argc, char ** argv)
   std::string network_metrics;
   std::string observer_endpoint;
   std::string world_path;
+  std::string targets_path;
+  std::string isr_socket, isr_scenario, isr_run_id;
+  std::string isr_reset_script;
   std::uint16_t rtsp_port = 0;
   try {
     for (int index = 1; index < argc; ++index) {
+      if (std::string(argv[index]) == "--gcs-port") {
+        if (sources.empty() || ++index == argc) throw std::invalid_argument("GCS port needs a vehicle and port");
+        const auto port = std::stoul(argv[index]);
+        if (port == 0 || port > 65535) throw std::invalid_argument("GCS port out of range");
+        sources.back().gcs_port = static_cast<std::uint16_t>(port);
+        continue;
+      }
       if (std::string(argv[index]) == "--rtsp") {
         if (++index == argc) throw std::invalid_argument("RTSP port is required");
         const auto port = std::stoul(argv[index]);
@@ -940,6 +1124,31 @@ int main(int argc, char ** argv)
       if (std::string(argv[index]) == "--world") {
         if (++index == argc) throw std::invalid_argument("world file path is required");
         world_path = argv[index];
+        continue;
+      }
+      if (std::string(argv[index]) == "--targets") {
+        if (++index == argc) throw std::invalid_argument("ISR targets file path is required");
+        targets_path = argv[index];
+        continue;
+      }
+      if (std::string(argv[index]) == "--isr-socket") {
+        if (++index == argc) throw std::invalid_argument("ISR Edge Server socket is required");
+        isr_socket = argv[index];
+        continue;
+      }
+      if (std::string(argv[index]) == "--isr-scenario") {
+        if (++index == argc) throw std::invalid_argument("ISR scenario ID is required");
+        isr_scenario = argv[index];
+        continue;
+      }
+      if (std::string(argv[index]) == "--isr-run-id") {
+        if (++index == argc) throw std::invalid_argument("ISR run ID is required");
+        isr_run_id = argv[index];
+        continue;
+      }
+      if (std::string(argv[index]) == "--isr-reset-script") {
+        if (++index == argc) throw std::invalid_argument("ISR reset script path is required");
+        isr_reset_script = argv[index];
         continue;
       }
       if (std::string(argv[index]) == "--observer") {
@@ -955,7 +1164,7 @@ int main(int argc, char ** argv)
       if (std::string(argv[index]) != "--vehicle" || ++index == argc) {
         TraceLog(LOG_ERROR,
           "usage: %s [--network-metrics PATH] [--observer ADDR] [--world PATH] [--rtsp PORT]"
-          " --vehicle ID --port PX4_SIH_PORT [...]",
+          " --vehicle ID --port TELEMETRY_PORT [--gcs-port GCS_PORT] [...]",
           argv[0]);
         return 2;
       }
@@ -963,7 +1172,7 @@ int main(int argc, char ** argv)
       if (++index == argc || std::string(argv[index]) != "--port" || ++index == argc) {
         TraceLog(LOG_ERROR,
           "usage: %s [--network-metrics PATH] [--observer ADDR] [--world PATH] [--rtsp PORT]"
-          " --vehicle ID --port PX4_SIH_PORT [...]",
+          " --vehicle ID --port TELEMETRY_PORT [--gcs-port GCS_PORT] [...]",
           argv[0]);
         return 2;
       }
@@ -977,6 +1186,12 @@ int main(int argc, char ** argv)
   }
   if (sources.empty()) {
     TraceLog(LOG_ERROR, "at least one PX4 SIH telemetry source is required");
+    return 2;
+  }
+  std::vector<IsrTarget> isr_targets;
+  try { isr_targets = read_isr_targets(targets_path); }
+  catch (const std::exception & error) {
+    TraceLog(LOG_ERROR, "%s", error.what());
     return 2;
   }
 #ifdef DITTO_CESIUM_VIEWER
@@ -1152,6 +1367,14 @@ int main(int argc, char ** argv)
       cesium_tiles = std::make_unique<sim::cesium::RaylibTileset>(
         origin.latitude, origin.longitude, environment_number("SIM_VIEWER_ORIGIN_ALT").value_or(0.0),
         environment_number("SIM_VIEWER_RADIUS_M").value_or(500.0), cesium_token);
+      if (!isr_targets.empty()) {
+        std::vector<Vector2> sites;
+        for (auto & target : isr_targets) {
+          target.surface_ready = false;
+          sites.push_back({target.east_m, target.north_m});
+        }
+        cesium_tiles->sample_surfaces(sites);
+      }
     } catch (const std::exception& error) {
       TraceLog(LOG_ERROR, "could not start Cesium tiles: %s", error.what());
       stopping.store(true);
@@ -1176,6 +1399,11 @@ int main(int argc, char ** argv)
       TraceLog(LOG_ERROR, "no camera feeds: %s", error.what());
     }
   }
+  std::vector<OcclusionSample> occlusion(feeds ? feeds->size() * isr_targets.size() : 0);
+  std::unique_ptr<IsrPublisher> isr_publisher;
+  if (!isr_targets.empty() && !isr_socket.empty())
+    isr_publisher = std::make_unique<IsrPublisher>(isr_socket, isr_scenario, isr_run_id,
+      origin.latitude, origin.longitude, isr_targets);
   Font ui_font = LoadFontEx("/System/Library/Fonts/SFNS.ttf", 48, nullptr, 0);
   SetTextureFilter(ui_font.texture, TEXTURE_FILTER_BILINEAR);
   const auto draw_text = [&ui_font](
@@ -1261,6 +1489,7 @@ int main(int argc, char ** argv)
   };
   // Opens already following one: for a headless capture of that view, or a demo.
   if (const char * preselect = std::getenv("SIM_VIEWER_SELECT")) select_vehicle(preselect);
+  else if (feeds) selected_vehicle = sources.front().vehicle.id;
   // A left-press in the world both pans the camera and, if it turns out not to
   // have moved, selects whatever is under it. Only a release close to where the
   // press landed counts as a click.
@@ -1276,6 +1505,9 @@ int main(int argc, char ** argv)
   const char * capture_path = std::getenv("SIM_VIEWER_CAPTURE");
   bool captured = false;
   int settle_frames = 0;
+  pid_t reset_pid = -1;
+  bool resetting = false, reset_process_done = false, reset_failed = false, reset_completed = false;
+  std::int64_t reset_started_ms = 0;
 
   const Color sky = city_map ? Color{174, 214, 235, 255} : Color{238, 243, 247, 255};
   // Scenery as seen from `eye`, for the window (view 0) or a vehicle camera.
@@ -1421,6 +1653,27 @@ int main(int argc, char ** argv)
       }
       visible.emplace(id, presented(presentations.at(id), render_time));
     }
+    if (reset_pid > 0) {
+      int status = 0;
+      const pid_t done = waitpid(reset_pid, &status, WNOHANG);
+      if (done == reset_pid) {
+        reset_pid = -1;
+        reset_process_done = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        if (!reset_process_done) { resetting = false; reset_failed = true; }
+      }
+    }
+    if (resetting && reset_process_done && (!isr_publisher || isr_publisher->idle())) {
+      const bool at_origin = visible.size() == sources.size() && std::all_of(
+        visible.begin(), visible.end(), [reset_started_ms, now](const auto & entry) {
+          const auto & vehicle = entry.second;
+          return vehicle.published_unix_ms > reset_started_ms &&
+            now - vehicle.published_unix_ms < 3000 &&
+            std::hypot(vehicle.north_m, vehicle.east_m) < 2.0F &&
+            std::abs(vehicle.down_m + 5.0F) < 2.0F;
+        });
+      if (at_origin) { resetting = false; reset_completed = true; }
+    }
+    if (resetting && now - reset_started_ms > 180000) { resetting = false; reset_failed = true; }
     if (following) {
       if (const auto found = visible.find(selected_vehicle); found != visible.end()) {
         const Vehicle & vehicle = found->second;
@@ -1451,6 +1704,12 @@ int main(int argc, char ** argv)
       // The projection spans the whole window (the sidebar only scissors it),
       // so tile selection must see the same frustum or it culls the left edge.
       cesium_tiles->update(camera, GetScreenWidth(), GetScreenHeight(), GetFrameTime());
+      for (std::size_t i = 0; i < isr_targets.size(); ++i) {
+        if (const auto height = cesium_tiles->surface_height(i)) {
+          isr_targets[i].surface_m = *height;
+          isr_targets[i].surface_ready = true;
+        }
+      }
     }
 #endif
     const float prop_degrees = static_cast<float>(std::fmod(GetTime() * 3.5, 1.0) * 360.0);
@@ -1473,7 +1732,40 @@ int main(int argc, char ** argv)
         if (!vehicle.ground) draw_drone(vehicle, position, prop_degrees, eye.position);
         else if (const auto phase = gait_phase.find(id); phase != gait_phase.end()) draw_robot(vehicle, position, phase->second);
       }
+      std::vector<std::pair<std::size_t, TargetBox>> recognized;
+      for (std::size_t i = 0; i < isr_targets.size(); ++i) {
+        const auto & target = isr_targets[i];
+        if (!target.surface_ready) continue;
+        const auto box = projected_target(target, eye, sim::video::Feeds::kWidth, sim::video::Feeds::kHeight);
+        if (!resetting && box) {
+          auto & sample = occlusion[index * isr_targets.size() + i];
+          if (sample.checked == Clock::time_point{} || render_time - sample.checked >= std::chrono::milliseconds(200)) {
+            sample.clear = target_unoccluded(target, eye, sim::video::Feeds::kWidth, sim::video::Feeds::kHeight);
+            sample.checked = render_time;
+          }
+          if (sample.clear) recognized.emplace_back(i, *box);
+        }
+      }
+      for (const auto & target : isr_targets) if (target.surface_ready) {
+        DrawCube(target.center(), 2.2F, 2.2F, 2.2F, {196, 36, 48, 255});
+        DrawCubeWires(target.center(), 2.25F, 2.25F, 2.25F, {255, 78, 78, 255});
+      }
       EndMode3D();
+      for (const auto & [target_index, box] : recognized) {
+        auto & target = isr_targets[target_index];
+        DrawRectangleLinesEx(box.pixels, 3.0F, {255, 48, 48, 255});
+        const std::string caption = target.id + "  TARGET ACQUIRED  " +
+          std::to_string(static_cast<int>(box.distance_m)) + "m";
+        const float label_y = std::max(0.0F, box.pixels.y - 28.0F);
+        const float label_w = MeasureTextEx(ui_font, caption.c_str(), 17, 0.5F).x + 18.0F;
+        DrawRectangle(static_cast<int>(box.pixels.x), static_cast<int>(label_y),
+          static_cast<int>(label_w), 25, {152, 24, 33, 235});
+        draw_text(caption.c_str(), box.pixels.x + 8.0F, label_y + 3.0F, 17, RAYWHITE);
+        if (!target.found) {
+          target.found = true;
+          if (isr_publisher) isr_publisher->publish(target, true, own->first);
+        }
+      }
 #ifdef DITTO_CESIUM_VIEWER
       // The tiles' licence wants their credit wherever they are shown, and on
       // a shaded strip, since the ground behind it is often white concrete.
@@ -1493,6 +1785,10 @@ int main(int argc, char ** argv)
     BeginScissorMode(0, 0, static_cast<int>(sidebar_left), GetScreenHeight());
     BeginMode3D(camera);
     draw_scenery(0, camera.position);
+    for (const auto & target : isr_targets) if (target.surface_ready) {
+      DrawCube(target.center(), 2.2F, 2.2F, 2.2F, {196, 36, 48, 255});
+      DrawCubeWires(target.center(), 2.25F, 2.25F, 2.25F, {255, 78, 78, 255});
+    }
     for (const auto & [id, vehicle] : visible) {
       const Vector3 position = sim::world::view_point(vehicle.east_m, -vehicle.down_m, vehicle.north_m);
       if (vehicle.ground) {
@@ -1586,6 +1882,19 @@ int main(int argc, char ** argv)
     }
     EndMode3D();
     EndScissorMode();
+
+    for (const auto & target : isr_targets) if (target.surface_ready) {
+      const Vector3 toward = Vector3Subtract(target.center(), camera.position);
+      if (Vector3DotProduct(toward, Vector3Subtract(camera.target, camera.position)) <= 0.0F) continue;
+      const Vector2 at = GetWorldToScreen(target.center(), camera);
+      if (at.x < 0 || at.x >= sidebar_left || at.y < 110 || at.y >= GetScreenHeight() - 32) continue;
+      const std::string label = target.id + (target.found ? "  FOUND" : "  TARGET");
+      const float width = MeasureTextEx(ui_font, label.c_str(), 13, 0.5F).x + 14.0F;
+      const float label_x = std::clamp(at.x - width * 0.5F, 4.0F, sidebar_left - width - 4.0F);
+      DrawRectangleRounded({label_x, at.y - 36.0F, width, 20.0F}, 0.25F, 4,
+        target.found ? Color{123, 28, 39, 235} : Color{72, 33, 39, 235});
+      draw_text(label.c_str(), label_x + 7.0F, at.y - 33.0F, 13, RAYWHITE);
+    }
 
 #ifndef DITTO_CESIUM_VIEWER
     for (const auto & landmark : world.landmarks) {
@@ -1715,8 +2024,9 @@ int main(int argc, char ** argv)
     for (const auto & [id, vehicle] : snapshot.vehicles) vehicle_ids.push_back(id);
     std::sort(vehicle_ids.begin(), vehicle_ids.end(), vehicle_less);
     const float row_height = std::clamp(
-      (GetScreenHeight() - 94.0F) / std::max(1.0F, static_cast<float>(vehicle_ids.size())),
-      21.0F, 27.0F);
+      (GetScreenHeight() - 94.0F - (feeds ? 120.0F : 0.0F)) /
+        std::max(1.0F, static_cast<float>(vehicle_ids.size())),
+      feeds ? 18.0F : 21.0F, 27.0F);
     float row = 94.0F;
     for (const auto & id : vehicle_ids) {
       const auto & vehicle = snapshot.vehicles.at(id);
@@ -1748,6 +2058,62 @@ int main(int argc, char ** argv)
         select_vehicle(id);
       }
       row += row_height;
+    }
+    if (!isr_reset_script.empty()) {
+      const int found_count = static_cast<int>(std::count_if(isr_targets.begin(), isr_targets.end(),
+        [](const IsrTarget & target) { return target.found; }));
+      draw_text(TextFormat("ISR TARGETS  %d / %d found", found_count,
+        static_cast<int>(isr_targets.size())), sidebar_left + 16.0F,
+        static_cast<float>(GetScreenHeight()) - 284.0F, 14, RAYWHITE);
+      for (std::size_t i = 0; i < isr_targets.size(); ++i) {
+        const auto & target = isr_targets[i];
+        draw_text(TextFormat("%s  N%.0f E%.0f  %s", target.id.c_str(), target.north_m,
+          target.east_m, target.found ? "FOUND" : "UNSEEN"), sidebar_left + 16.0F,
+          static_cast<float>(GetScreenHeight()) - 259.0F + static_cast<float>(i) * 20.0F,
+          12, target.found ? Color{255, 124, 124, 255} : Color{174, 193, 212, 255});
+      }
+      const Rectangle reset_button{sidebar_left + 16.0F, static_cast<float>(GetScreenHeight()) - 169.0F,
+        sidebar_width - 32.0F, 36.0F};
+      DrawRectangleRounded(reset_button, 0.18F, 5,
+        resetting ? Color{78, 91, 107, 255} : Color{153, 37, 45, 255});
+      draw_text(resetting ? "RESETTING MISSION..." : "RESET MISSION",
+        reset_button.x + 12.0F, reset_button.y + 8.0F, 16, RAYWHITE);
+      if (reset_failed) draw_text("Reset failed — see runtime/isr-reset.log",
+        reset_button.x, reset_button.y - 22.0F, 12, {255, 183, 77, 255});
+      else if (reset_completed) draw_text("Fleet home; target state cleared",
+        reset_button.x, reset_button.y - 22.0F, 12, {101, 214, 159, 255});
+      if (!resetting && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
+        CheckCollisionPointRec(GetMousePosition(), reset_button))
+      {
+        resetting = true; reset_failed = reset_completed = reset_process_done = false;
+        reset_started_ms = unix_time_ms();
+        for (auto & target : isr_targets) {
+          target.found = false;
+          if (isr_publisher) isr_publisher->publish(target, false, "");
+        }
+        char * args[] = {const_cast<char *>("/bin/bash"),
+          const_cast<char *>(isr_reset_script.c_str()), nullptr};
+        const int error = posix_spawn(&reset_pid, "/bin/bash", nullptr, nullptr, args, environ);
+        if (error != 0) { reset_pid = -1; resetting = false; reset_failed = true; }
+      }
+    }
+    if (feeds && !selected_vehicle.empty()) {
+      const auto source = std::find_if(sources.begin(), sources.end(), [&](const Source & item) {
+        return item.vehicle.id == selected_vehicle;
+      });
+      if (source != sources.end()) {
+        const float top = static_cast<float>(GetScreenHeight()) - 112.0F;
+        DrawLine(static_cast<int>(sidebar_left + 12.0F), static_cast<int>(top - 8.0F),
+          GetScreenWidth() - 12, static_cast<int>(top - 8.0F), {121, 146, 173, 255});
+        draw_text("CAMERA & MAVLINK (LOCAL)", sidebar_left + 16.0F, top, 14, RAYWHITE);
+        draw_text(TextFormat("rtsp://localhost:%u/%s", rtsp_port, selected_vehicle.c_str()),
+          sidebar_left + 16.0F, top + 25.0F, 12, {101, 214, 159, 255});
+        draw_text(TextFormat("Telemetry UDP: %u", source->telemetry_port),
+          sidebar_left + 16.0F, top + 50.0F, 12, {174, 193, 212, 255});
+        draw_text(source->gcs_port ? TextFormat("GCS MAVLink TCP: %u", source->gcs_port) :
+          "GCS MAVLink TCP: unavailable", sidebar_left + 16.0F, top + 72.0F, 12,
+          {174, 193, 212, 255});
+      }
     }
     // What the observer says the network is, and the one control that makes
     // the point: the cloud is a path nobody configured a mesh for.
@@ -1964,6 +2330,8 @@ int main(int argc, char ** argv)
   }
   if (observer_watcher.joinable()) observer_watcher.join();
   poller.join();
+  if (reset_pid > 0) { kill(reset_pid, SIGTERM); waitpid(reset_pid, nullptr, 0); }
+  isr_publisher.reset();
   feeds.reset();  // its GL resources need the window
   sim::world::unload(world);
   UnloadFont(ui_font);

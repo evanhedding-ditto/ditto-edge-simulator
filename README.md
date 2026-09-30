@@ -103,6 +103,7 @@ Only one scenario at a time. Starting a second while the first is up is refused.
 | `park-mgm-two-px4` | 2 PX4 | the same stack over a 1 km display-only map around Park MGM |
 | `park-mgm-cesium` | 1 PX4 | Park MGM Cesium MVP; fly and watch from UAS Tool |
 | `park-mgm-cesium-10` | 1 PX4 + 10 synthetic | The MVP plus ten cloud-connected, commandable synthetic nodes |
+| `park-mgm-8x8` | 8 PX4 + 8 synthetic | ISR load test; each PX4 on UAS Tool at TCP `5760+i` |
 | `park-mgm-8-px4` | 8 PX4 | each PX4 on UAS Tool at TCP `5760+i`, with its own RTSP feed |
 | `mvp-four-mixed` | 4 PX4 | two ROS 2 adapters, two native MAVLink adapters |
 | `mvp-twenty-mixed` | 20 PX4 | ten of each adapter; the real-stack ceiling on one machine |
@@ -294,10 +295,10 @@ viewer displays both attributions. The imagery is public domain per USGS.
 
 ## The viewer
 
-raylib, 3D, read-only. It parses PX4's dedicated MAVLink display stream straight
-off UDP and reads the relay's link metrics. It does not talk to Edge Server, an
-adapter, or any replicated state, which is the whole reason it stays trustworthy
-while you are breaking the Ditto path on purpose.
+raylib, 3D. It parses PX4's dedicated MAVLink display stream straight off UDP
+and reads the relay's link metrics. Ordinary worlds remain display-only. The
+Park MGM ISR scenario is the exception: the viewer writes a target document
+only after a camera feed recognizes that target.
 
 It pins its horizontal origin to the configured PX4 home position and widens the
 map past four vehicles, so restarting it mid-flight does not shift the fleet.
@@ -321,6 +322,17 @@ viewer renders only while someone watches and encodes in hardware
 (`viewer/src/video.cpp`); closing the viewer ends it. While the viewer serves
 video, macOS neither naps it nor lets the Mac idle-sleep. Ditto keeps its own
 control path, and whichever of Ditto or the phone commanded last is in charge.
+
+`park-mgm-8x8` and `park-mgm-8-px4` have four fixed ISR sites in `scenarios/park-mgm-isr-targets.json`.
+Cesium samples the surface beneath each site so the 2.2 m red target rests on
+the road or roof. In a watched camera feed, a target receives a red bounding
+box and `TARGET ACQUIRED` label when it is fully in frame, unobstructed, within
+100 m, and at least 18 pixels across. First recognition publishes its position
+and detecting vehicle to a per-target `isr_targets` document, subscribed by
+every Edge Server. The viewer sidebar shows the fixed coordinates and found
+count. `RESET MISSION` clears found state and commands every vehicle to hold
+at home, 5 m up, without reloading Cesium tiles. CoT target publication is not
+part of this first version.
 
 macOS's firewall has to allow `ditto_gcs_relay` and `ditto_fleet_viewer_cesium`
 to accept incoming connections. It asks the first time, and again after a

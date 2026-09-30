@@ -40,7 +40,7 @@ target_compile_features(ditto_fleet_viewer PRIVATE cxx_std_17)
 target_compile_options(ditto_fleet_viewer PRIVATE -Wall -Wextra -Wpedantic -Wno-missing-field-initializers)
 target_include_directories(ditto_fleet_viewer PRIVATE "${PX4_ROOT}/build/px4_sitl_sih")
 target_link_libraries(ditto_fleet_viewer PRIVATE
-  raylib nlohmann_json::nlohmann_json DittoObserver::Client ${DITTO_VIDEO_FRAMEWORKS})
+  raylib nlohmann_json::nlohmann_json DittoObserver::Client DittoEdge::Client ${DITTO_VIDEO_FRAMEWORKS})
 
 if(DITTO_ENABLE_CESIUM_NATIVE)
   add_subdirectory(viewer/cesium)

@@ -304,7 +304,8 @@ struct RaylibTileset::Impl {
       const std::string& token)
       : processor(std::make_shared<WorkerPool>(4)), async(processor),
         accessor(std::make_shared<CesiumCurl::CurlAssetAccessor>()),
-        credits(std::make_shared<CesiumUtility::CreditSystem>()) {
+        credits(std::make_shared<CesiumUtility::CreditSystem>()),
+        home_latitude(latitude), home_longitude(longitude), home_altitude(altitude) {
     using CesiumGeospatial::Cartographic;
     const auto& ellipsoid = CesiumGeospatial::Ellipsoid::WGS84;
     const Cartographic home = Cartographic::fromDegrees(longitude, latitude, altitude);
@@ -344,7 +345,36 @@ struct RaylibTileset::Impl {
             ground_offset = result.positions[0].height - altitude;
           else
             TraceLog(LOG_WARNING, "Cesium: no ground height under home; tiles stay at SIM_VIEWER_ORIGIN_ALT");
+          ground_ready = true;
         });
+  }
+
+  void sample_surfaces(const std::vector<Vector2>& sites) {
+    using CesiumGeospatial::Cartographic;
+    constexpr double metres_per_degree = 111319.49079327357;
+    std::vector<Cartographic> positions;
+    positions.reserve(sites.size());
+    for (const Vector2 site : sites) {
+      const double latitude = home_latitude + site.y / metres_per_degree;
+      const double longitude = home_longitude + site.x /
+          (metres_per_degree * std::cos(home_latitude * 3.14159265358979323846 / 180.0));
+      positions.push_back(Cartographic::fromDegrees(longitude, latitude));
+    }
+    sampled_heights.assign(sites.size(), std::nullopt);
+    tileset->sampleHeightMostDetailed(positions)
+        .thenInMainThread([this](Cesium3DTilesSelection::SampleHeightResult&& result) {
+          for (std::size_t i = 0; i < sampled_heights.size() && i < result.positions.size(); ++i) {
+            if (i < result.sampleSuccess.size() && result.sampleSuccess[i])
+              sampled_heights[i] = result.positions[i].height;
+            else
+              TraceLog(LOG_WARNING, "Cesium: no surface height for ISR target %zu", i + 1);
+          }
+        });
+  }
+
+  std::optional<float> surface_height(std::size_t site) const noexcept {
+    if (!ground_ready || site >= sampled_heights.size() || !sampled_heights[site]) return std::nullopt;
+    return static_cast<float>(*sampled_heights[site] - home_altitude - ground_offset);
   }
 
   struct Renderer final : Cesium3DTilesSelection::IPrepareRendererResources {
@@ -382,6 +412,9 @@ struct RaylibTileset::Impl {
   std::shared_ptr<CesiumUtility::CreditSystem> credits;
   std::shared_ptr<Renderer> renderer;
   double ground_offset = 0.0;  // before `tileset`, whose teardown may still resolve the sample
+  double home_latitude{}, home_longitude{}, home_altitude{};
+  bool ground_ready{};
+  std::vector<std::optional<double>> sampled_heights;
   std::unique_ptr<Cesium3DTilesSelection::Tileset> tileset;
   glm::dvec3 origin{}, east{}, south{}, up{};
   glm::dmat4 ecefToLocal{1.0};
@@ -455,5 +488,9 @@ bool RaylibTileset::idle() const noexcept {
 }
 const std::string& RaylibTileset::status() const noexcept { return _impl->load_status; }
 const std::string& RaylibTileset::attribution() const noexcept { return _impl->credit_text; }
+void RaylibTileset::sample_surfaces(const std::vector<Vector2>& sites) { _impl->sample_surfaces(sites); }
+std::optional<float> RaylibTileset::surface_height(std::size_t site) const noexcept {
+  return _impl->surface_height(site);
+}
 
 } // namespace sim::cesium

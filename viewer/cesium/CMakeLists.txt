@@ -47,5 +47,5 @@ target_include_directories(ditto_fleet_viewer_cesium PRIVATE
   "${PX4_ROOT}/build/px4_sitl_sih"
   "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(ditto_fleet_viewer_cesium PRIVATE
-  raylib nlohmann_json::nlohmann_json DittoObserver::Client
+  raylib nlohmann_json::nlohmann_json DittoObserver::Client DittoEdge::Client
   Ditto::CesiumNative CesiumCurl ${_cesium_absl_archives} ${DITTO_VIDEO_FRAMEWORKS})

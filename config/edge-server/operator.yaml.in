@@ -37,6 +37,7 @@ database:
     - "SELECT * FROM vehicle_state"
     - "SELECT * FROM fleet_commands"
     - "SELECT * FROM fleet_command_receipts"
+    - "SELECT * FROM isr_targets"
 
 grpc_server:
   socket_path: "${SIM_SOCKET_PATH}"

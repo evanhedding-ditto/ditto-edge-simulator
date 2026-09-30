@@ -23,6 +23,9 @@ fi
 arguments=()
 for ((index = 0; index < SIM_VEHICLE_COUNT; ++index)); do
   arguments+=(--vehicle "px4_$index" --port "$((19410 + index))")
+  if [[ -n "${SIM_GCS_TCP_PORT:-}" ]] && ! is_synthetic_vehicle "$index"; then
+    arguments+=(--gcs-port "$((SIM_GCS_TCP_PORT + index))")
+  fi
 done
 # Static scenery, when the scenario names one. Relative paths resolve against
 # the repository root so a scenario file can stay short. Drawn by the viewer and
@@ -32,6 +35,16 @@ if [[ -n "${SIM_WORLD_FILE:-}" ]]; then
   [[ "$world_file" == /* ]] || world_file="$SIM_ROOT/$world_file"
   [[ -r "$world_file" ]] || die "world file not readable: $world_file"
   arguments+=(--world "$world_file")
+fi
+if [[ -n "${SIM_ISR_TARGETS_FILE:-}" ]]; then
+  targets_file="$SIM_ISR_TARGETS_FILE"
+  [[ "$targets_file" == /* ]] || targets_file="$SIM_ROOT/$targets_file"
+  [[ -r "$targets_file" ]] || die "ISR targets file not readable: $targets_file"
+  arguments+=(--targets "$targets_file")
+  arguments+=(--isr-socket "$(node_socket operator)")
+  arguments+=(--isr-scenario "$SIM_SCENARIO_ID")
+  arguments+=(--isr-run-id "$(cat "$SIM_RUNTIME_DIR/run-started-unix-ms")")
+  arguments+=(--isr-reset-script "$SIM_ROOT/scripts/session/reset-isr.sh")
 fi
 arguments+=(--network-metrics "$SIM_RUNTIME_DIR/network-metrics.json")
 # Each vehicle's camera as RTSP for a ground station: rtsp://<host>:PORT/px4_<index>.

@@ -91,6 +91,7 @@ std::int64_t unix_time_ms()
             << "  " << program << " --socket PATH ready VEHICLE_COUNT\n"
             << "  " << program << " --socket PATH verify VEHICLE_COUNT\n"
             << "  " << program << " --socket PATH batch [FILE]\n"
+            << "  " << program << " --socket PATH targets\n"
             << "        one 'VEHICLE ACTION [ARGUMENT...]' per line, '-' or\n"
             << "        omitted FILE reads stdin; applied as a single write\n";
   std::exit(2);
@@ -458,6 +459,19 @@ int main(int argc, char ** argv)
     usage(argv[0]);
   }
   const std::string action(argv[3]);
+  if (action == "targets") {
+    if (argc != 4) usage(argv[0]);
+    try {
+      ditto::edge::Client client(argv[2], std::string{}, std::chrono::seconds(30));
+      ditto::edge::StoreResult result;
+      execute(client, "SELECT * FROM isr_targets", nlohmann::json::object(), result);
+      std::cout << nlohmann::json::parse(result.documents_json).dump(2) << '\n';
+      return 0;
+    } catch (const std::exception & exception) {
+      std::cerr << "error: " << exception.what() << '\n';
+      return 1;
+    }
+  }
   // `batch` is the one action that names no vehicle, so it is dispatched before
   // the checks that require argv[4].
   if (action == "batch") {

@@ -4,7 +4,9 @@
 
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
+#include <vector>
 
 namespace sim::cesium {
 
@@ -24,6 +26,9 @@ public:
   bool idle() const noexcept;
   const std::string& status() const noexcept;
   const std::string& attribution() const noexcept;
+  /// Sample the rendered 3D Tiles surface under fixed local (east, north) sites.
+  void sample_surfaces(const std::vector<Vector2>& sites);
+  std::optional<float> surface_height(std::size_t site) const noexcept;
 
 private:
   struct Impl;
