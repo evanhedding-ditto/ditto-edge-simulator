@@ -22,9 +22,10 @@ endif()
 set(ENV{VCPKG_OVERLAY_TRIPLETS} "${_cesium_triplet_overlays}")
 
 FetchContent_Declare(cesium_native
-  GIT_REPOSITORY https://github.com/CesiumGS/cesium-native.git
-  GIT_TAG 80a22ff4337c5b7057cff53d0055045c15c6d350
-  GIT_SHALLOW FALSE)
+  # The source tarball, 18 MB; a full git clone is hundreds of MB.
+  URL https://github.com/CesiumGS/cesium-native/archive/80a22ff4337c5b7057cff53d0055045c15c6d350.tar.gz
+  URL_HASH SHA256=facc81400400e1c12712df1f458f156f949d3782c9e42723df8533f7d0433028
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
 FetchContent_MakeAvailable(cesium_native)
 file(GLOB _cesium_absl_archives "${_cesium_vcpkg_prefix}/lib/libabsl_*.a")
 
