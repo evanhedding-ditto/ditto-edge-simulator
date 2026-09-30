@@ -103,6 +103,7 @@ Only one scenario at a time. Starting a second while the first is up is refused.
 | `park-mgm-two-px4` | 2 PX4 | the same stack over a 1 km display-only map around Park MGM |
 | `park-mgm-cesium` | 1 PX4 | Park MGM Cesium MVP; fly and watch from UAS Tool |
 | `park-mgm-cesium-10` | 1 PX4 + 10 synthetic | The MVP plus ten cloud-connected, commandable synthetic nodes |
+| `park-mgm-8-px4` | 8 PX4 | each PX4 on UAS Tool at TCP `5760+i`, with its own RTSP feed |
 | `mvp-four-mixed` | 4 PX4 | two ROS 2 adapters, two native MAVLink adapters |
 | `mvp-twenty-mixed` | 20 PX4 | ten of each adapter; the real-stack ceiling on one machine |
 | `synthetic-twenty` | 20 synthetic | same shape as the above, without PX4 itself |
