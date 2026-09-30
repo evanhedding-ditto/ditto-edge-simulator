@@ -323,14 +323,17 @@ viewer renders only while someone watches and encodes in hardware
 video, macOS neither naps it nor lets the Mac idle-sleep. Ditto keeps its own
 control path, and whichever of Ditto or the phone commanded last is in charge.
 
-`park-mgm-8x8` and `park-mgm-8-px4` have four fixed ISR sites in `scenarios/park-mgm-isr-targets.json`.
-Cesium samples the surface beneath each site so the 2.2 m red target rests on
-the road or roof. In a watched camera feed, a target receives a red bounding
+`park-mgm-8x8` and `park-mgm-8-px4` have sixteen fixed ISR sites on roads and
+flat roofs in `scenarios/park-mgm-isr-targets.json`. The sidebar's count menu
+places the first 1 to 16 of them (4 at start); the file is ordered so any
+prefix stays spread across the map.
+Cesium samples the surface beneath each site so the target, a standing factory
+robot, rests on the road or roof. In a watched camera feed, a target receives a red bounding
 box and `TARGET ACQUIRED` label when it is fully in frame, unobstructed, within
-100 m, and at least 18 pixels across. First recognition publishes its position
+100 m, and at least 12 pixels tall. First recognition publishes its position
 and detecting vehicle to a per-target `isr_targets` document, subscribed by
-every Edge Server. The viewer sidebar shows the fixed coordinates and found
-count. `RESET MISSION` clears found state and commands every vehicle to hold
+every Edge Server; targets outside the chosen count are published as
+`inactive`. The viewer sidebar shows the found count. `RESET MISSION` clears found state and commands every vehicle to hold
 at home, 5 m up, without reloading Cesium tiles. CoT target publication is not
 part of this first version.
 

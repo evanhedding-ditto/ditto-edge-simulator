@@ -320,7 +320,9 @@ struct IsrTarget {
   float north_m{}, east_m{}, surface_m{};
   bool found{};
   bool surface_ready{true};
-  Vector3 center() const { return sim::world::view_point(east_m, surface_m + 1.1F, north_m); }
+  Vehicle robot;  // a standing factory robot, drawn by draw_robot
+  Vector3 base() const { return sim::world::view_point(east_m, surface_m, north_m); }
+  Vector3 center() const { return sim::world::view_point(east_m, surface_m + 0.8F, north_m); }
 };
 
 std::vector<IsrTarget> read_isr_targets(const std::string & path)
@@ -339,6 +341,10 @@ std::vector<IsrTarget> read_isr_targets(const std::string & path)
     target.surface_m = entry.at("surface_hint_m").get<float>();
     if (target.id.empty() || !std::isfinite(target.north_m) || !std::isfinite(target.east_m) ||
       !std::isfinite(target.surface_m)) throw std::runtime_error("invalid ISR target in " + path);
+    // Spread headings by the golden angle so neighbouring robots face apart.
+    const float yaw = static_cast<float>(targets.size()) * 2.39996F;
+    target.robot.id = target.id;
+    target.robot.attitude_quaternion = {std::cos(yaw * 0.5F), 0.0F, 0.0F, std::sin(yaw * 0.5F)};
     targets.push_back(std::move(target));
   }
   return targets;
@@ -358,18 +364,22 @@ std::optional<TargetBox> projected_target(const IsrTarget & target, const Camera
     return std::nullopt;
   Vector2 low{static_cast<float>(width), static_cast<float>(height)};
   Vector2 high{0.0F, 0.0F};
-  for (const float x : {-1.1F, 1.1F}) for (const float y : {-1.1F, 1.1F})
-    for (const float z : {-1.1F, 1.1F}) {
-      const Vector3 corner = Vector3Add(center, {x, y, z});
+  // The robot's bounds: 1.6 m tall and, with its arms out, 0.7 m across.
+  for (const float x : {-0.35F, 0.35F}) for (const float y : {0.0F, 1.6F})
+    for (const float z : {-0.35F, 0.35F}) {
+      const Vector3 corner = Vector3Add(target.base(), {x, y, z});
       if (Vector3DotProduct(Vector3Subtract(corner, camera.position), forward) <= 0.0F)
         return std::nullopt;
       const Vector2 pixel = GetWorldToScreenEx(corner, camera, width, height);
       low.x = std::min(low.x, pixel.x); low.y = std::min(low.y, pixel.y);
       high.x = std::max(high.x, pixel.x); high.y = std::max(high.y, pixel.y);
     }
-  if (low.x < 0 || low.y < 0 || high.x >= width || high.y >= height ||
-    high.x - low.x < 18.0F || high.y - low.y < 18.0F) return std::nullopt;
-  return TargetBox{{low.x, low.y, high.x - low.x, high.y - low.y}, distance};
+  // Recognized once 12 pixels tall, as a 1.6 m robot is at 100 m; the drawn box
+  // then stands clear of it rather than hugging it.
+  if (low.x < 0 || low.y < 0 || high.x >= width || high.y >= height || high.y - low.y < 12.0F)
+    return std::nullopt;
+  const float pad = std::max(10.0F, 0.35F * (high.y - low.y));
+  return TargetBox{{low.x - pad, low.y - pad, high.x - low.x + 2.0F * pad, high.y - low.y + 2.0F * pad}, distance};
 }
 
 bool target_unoccluded(const IsrTarget & target, const Camera3D & camera, const int width, const int height)
@@ -391,12 +401,12 @@ bool target_unoccluded(const IsrTarget & target, const Camera3D & camera, const 
 class IsrPublisher {
 public:
   IsrPublisher(std::string socket, std::string scenario, std::string run_id, const double home_latitude,
-    const double home_longitude, const std::vector<IsrTarget> & targets)
+    const double home_longitude, const std::vector<IsrTarget> & targets, const std::size_t active)
     : socket_(std::move(socket)), scenario_(std::move(scenario)), run_id_(std::move(run_id)),
       home_latitude_(home_latitude),
       home_longitude_(home_longitude), worker_([this] { run(); })
   {
-    for (const auto & target : targets) publish(target, false, "");
+    for (std::size_t i = 0; i < targets.size(); ++i) publish(targets[i], i < active);
   }
 
   ~IsrPublisher()
@@ -406,8 +416,10 @@ public:
     worker_.join();
   }
 
-  void publish(const IsrTarget & target, const bool found, std::string observer)
+  /// A target named by an observer is found; one outside the chosen count is inactive.
+  void publish(const IsrTarget & target, const bool active, std::string observer = {})
   {
+    const bool found = !observer.empty();
     constexpr double metres_per_degree = 111319.49079327357;
     nlohmann::json position = nullptr;
     if (found) position = {
@@ -420,8 +432,8 @@ public:
     nlohmann::json document{
       {"_id", scenario_ + "/" + target.id}, {"schema", "ditto.isr_target.v1"},
       {"run_id", run_id_}, {"target_id", target.id}, {"site", target.site},
-      {"state", found ? "found" : "unknown"}, {"position", position},
-      {"found_by", found ? observer : ""}, {"updated_unix_ms", now}};
+      {"state", found ? "found" : active ? "unknown" : "inactive"}, {"position", position},
+      {"found_by", std::move(observer)}, {"updated_unix_ms", now}};
     { std::lock_guard<std::mutex> lock(mutex_); pending_.push_back(std::move(document)); }
     ready_.notify_one();
   }
@@ -1400,10 +1412,13 @@ int main(int argc, char ** argv)
     }
   }
   std::vector<OcclusionSample> occlusion(feeds ? feeds->size() * isr_targets.size() : 0);
+  // The mission uses the file's first targets, so its order is the spread order.
+  std::size_t active_targets = std::min<std::size_t>(4, isr_targets.size());
+  bool target_menu = false;
   std::unique_ptr<IsrPublisher> isr_publisher;
   if (!isr_targets.empty() && !isr_socket.empty())
     isr_publisher = std::make_unique<IsrPublisher>(isr_socket, isr_scenario, isr_run_id,
-      origin.latitude, origin.longitude, isr_targets);
+      origin.latitude, origin.longitude, isr_targets, active_targets);
   Font ui_font = LoadFontEx("/System/Library/Fonts/SFNS.ttf", 48, nullptr, 0);
   SetTextureFilter(ui_font.texture, TEXTURE_FILTER_BILINEAR);
   const auto draw_text = [&ui_font](
@@ -1733,7 +1748,7 @@ int main(int argc, char ** argv)
         else if (const auto phase = gait_phase.find(id); phase != gait_phase.end()) draw_robot(vehicle, position, phase->second);
       }
       std::vector<std::pair<std::size_t, TargetBox>> recognized;
-      for (std::size_t i = 0; i < isr_targets.size(); ++i) {
+      for (std::size_t i = 0; i < active_targets; ++i) {
         const auto & target = isr_targets[i];
         if (!target.surface_ready) continue;
         const auto box = projected_target(target, eye, sim::video::Feeds::kWidth, sim::video::Feeds::kHeight);
@@ -1746,9 +1761,8 @@ int main(int argc, char ** argv)
           if (sample.clear) recognized.emplace_back(i, *box);
         }
       }
-      for (const auto & target : isr_targets) if (target.surface_ready) {
-        DrawCube(target.center(), 2.2F, 2.2F, 2.2F, {196, 36, 48, 255});
-        DrawCubeWires(target.center(), 2.25F, 2.25F, 2.25F, {255, 78, 78, 255});
+      for (std::size_t i = 0; i < active_targets; ++i) if (const auto & target = isr_targets[i]; target.surface_ready) {
+        draw_robot(target.robot, target.base(), 0.0F);
       }
       EndMode3D();
       for (const auto & [target_index, box] : recognized) {
@@ -1785,9 +1799,8 @@ int main(int argc, char ** argv)
     BeginScissorMode(0, 0, static_cast<int>(sidebar_left), GetScreenHeight());
     BeginMode3D(camera);
     draw_scenery(0, camera.position);
-    for (const auto & target : isr_targets) if (target.surface_ready) {
-      DrawCube(target.center(), 2.2F, 2.2F, 2.2F, {196, 36, 48, 255});
-      DrawCubeWires(target.center(), 2.25F, 2.25F, 2.25F, {255, 78, 78, 255});
+    for (std::size_t i = 0; i < active_targets; ++i) if (const auto & target = isr_targets[i]; target.surface_ready) {
+      draw_robot(target.robot, target.base(), 0.0F);
     }
     for (const auto & [id, vehicle] : visible) {
       const Vector3 position = sim::world::view_point(vehicle.east_m, -vehicle.down_m, vehicle.north_m);
@@ -1883,7 +1896,7 @@ int main(int argc, char ** argv)
     EndMode3D();
     EndScissorMode();
 
-    for (const auto & target : isr_targets) if (target.surface_ready) {
+    for (std::size_t i = 0; i < active_targets; ++i) if (const auto & target = isr_targets[i]; target.surface_ready) {
       const Vector3 toward = Vector3Subtract(target.center(), camera.position);
       if (Vector3DotProduct(toward, Vector3Subtract(camera.target, camera.position)) <= 0.0F) continue;
       const Vector2 at = GetWorldToScreen(target.center(), camera);
@@ -2054,23 +2067,53 @@ int main(int argc, char ** argv)
       DrawRectangleRounded(button, 0.2F, 4, button_color);
       draw_text(label, button.x + 8.0F, button.y + 3.0F, 12, RAYWHITE);
       const Rectangle row_button{sidebar_left, row, sidebar_width - 104.0F, row_height};
-      if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), row_button)) {
+      if (!target_menu && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
+        CheckCollisionPointRec(GetMousePosition(), row_button)) {
         select_vehicle(id);
       }
       row += row_height;
     }
     if (!isr_reset_script.empty()) {
-      const int found_count = static_cast<int>(std::count_if(isr_targets.begin(), isr_targets.end(),
+      const int found_count = static_cast<int>(std::count_if(isr_targets.begin(),
+        isr_targets.begin() + static_cast<std::ptrdiff_t>(active_targets),
         [](const IsrTarget & target) { return target.found; }));
-      draw_text(TextFormat("ISR TARGETS  %d / %d found", found_count,
-        static_cast<int>(isr_targets.size())), sidebar_left + 16.0F,
-        static_cast<float>(GetScreenHeight()) - 284.0F, 14, RAYWHITE);
-      for (std::size_t i = 0; i < isr_targets.size(); ++i) {
-        const auto & target = isr_targets[i];
-        draw_text(TextFormat("%s  N%.0f E%.0f  %s", target.id.c_str(), target.north_m,
-          target.east_m, target.found ? "FOUND" : "UNSEEN"), sidebar_left + 16.0F,
-          static_cast<float>(GetScreenHeight()) - 259.0F + static_cast<float>(i) * 20.0F,
-          12, target.found ? Color{255, 124, 124, 255} : Color{174, 193, 212, 255});
+      const float isr_top = static_cast<float>(GetScreenHeight()) - 212.0F;
+      draw_text(TextFormat("ISR TARGETS  %d / %d found", found_count, static_cast<int>(active_targets)),
+        sidebar_left + 16.0F, isr_top + 3.0F, 14, RAYWHITE);
+      // Target count: a button that opens a grid of 1..N above it, closed by any click.
+      const Rectangle count_button{sidebar_left + sidebar_width - 76.0F, isr_top, 60.0F, 22.0F};
+      DrawRectangleRounded(count_button, 0.25F, 4, resetting ? Color{58, 70, 84, 255} : Color{55, 84, 112, 255});
+      draw_text(TextFormat("%d", static_cast<int>(active_targets)), count_button.x + 10.0F,
+        count_button.y + 3.0F, 14, RAYWHITE);
+      DrawTriangle({count_button.x + 40.0F, count_button.y + 8.0F}, {count_button.x + 44.0F, count_button.y + 14.0F},
+        {count_button.x + 48.0F, count_button.y + 8.0F}, RAYWHITE);
+      const bool clicked = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+      const bool menu_was_open = target_menu;
+      if (target_menu) {
+        constexpr float cell = 30.0F;
+        const float menu_x = count_button.x + count_button.width - 4.0F * cell;
+        const float menu_y = isr_top - 4.0F - static_cast<float>((isr_targets.size() + 3) / 4) * cell;
+        DrawRectangle(static_cast<int>(menu_x) - 2, static_cast<int>(menu_y) - 2, static_cast<int>(4.0F * cell) + 4,
+          static_cast<int>(isr_top - menu_y), {121, 146, 173, 255});
+        for (std::size_t n = 1; n <= isr_targets.size(); ++n) {
+          const Rectangle item{menu_x + static_cast<float>((n - 1) % 4) * cell,
+            menu_y + static_cast<float>((n - 1) / 4) * cell, cell, cell};
+          const bool hover = CheckCollisionPointRec(GetMousePosition(), item);
+          DrawRectangleRec(item, n == active_targets ? Color{153, 37, 45, 255} :
+            hover ? Color{55, 84, 112, 255} : Color{30, 41, 59, 255});
+          draw_text(TextFormat("%d", static_cast<int>(n)), item.x + (n < 10 ? 11.0F : 7.0F), item.y + 7.0F,
+            14, RAYWHITE);
+          if (clicked && hover && n != active_targets) {
+            for (std::size_t i = std::min(n, active_targets); i < std::max(n, active_targets); ++i) {
+              isr_targets[i].found = false;
+              if (isr_publisher) isr_publisher->publish(isr_targets[i], i < n);
+            }
+            active_targets = n;
+          }
+        }
+        if (clicked) target_menu = false;
+      } else if (!resetting && clicked && CheckCollisionPointRec(GetMousePosition(), count_button)) {
+        target_menu = true;
       }
       const Rectangle reset_button{sidebar_left + 16.0F, static_cast<float>(GetScreenHeight()) - 169.0F,
         sidebar_width - 32.0F, 36.0F};
@@ -2082,14 +2125,13 @@ int main(int argc, char ** argv)
         reset_button.x, reset_button.y - 22.0F, 12, {255, 183, 77, 255});
       else if (reset_completed) draw_text("Fleet home; target state cleared",
         reset_button.x, reset_button.y - 22.0F, 12, {101, 214, 159, 255});
-      if (!resetting && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
-        CheckCollisionPointRec(GetMousePosition(), reset_button))
+      if (!resetting && !menu_was_open && clicked && CheckCollisionPointRec(GetMousePosition(), reset_button))
       {
         resetting = true; reset_failed = reset_completed = reset_process_done = false;
         reset_started_ms = unix_time_ms();
-        for (auto & target : isr_targets) {
-          target.found = false;
-          if (isr_publisher) isr_publisher->publish(target, false, "");
+        for (std::size_t i = 0; i < active_targets; ++i) {
+          isr_targets[i].found = false;
+          if (isr_publisher) isr_publisher->publish(isr_targets[i], true);
         }
         char * args[] = {const_cast<char *>("/bin/bash"),
           const_cast<char *>(isr_reset_script.c_str()), nullptr};

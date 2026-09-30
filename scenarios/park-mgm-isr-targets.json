@@ -4,6 +4,18 @@
     {"id": "target-1", "site": "Las Vegas Boulevard north", "kind": "road", "north_m": 80, "east_m": 0, "surface_hint_m": 0},
     {"id": "target-2", "site": "east rooftop", "kind": "roof", "north_m": 40, "east_m": 150, "surface_hint_m": 38},
     {"id": "target-3", "site": "southwest rooftop", "kind": "roof", "north_m": -200, "east_m": -300, "surface_hint_m": 26},
-    {"id": "target-4", "site": "southern boulevard", "kind": "road", "north_m": -200, "east_m": 0, "surface_hint_m": 0}
+    {"id": "target-4", "site": "southern boulevard", "kind": "road", "north_m": -200, "east_m": 0, "surface_hint_m": 0},
+    {"id": "target-5", "site": "west arena roof", "kind": "roof", "north_m": 160, "east_m": -390, "surface_hint_m": 0},
+    {"id": "target-6", "site": "Tropicana Avenue", "kind": "road", "north_m": -285, "east_m": 330, "surface_hint_m": 0},
+    {"id": "target-7", "site": "northeast parking deck", "kind": "roof", "north_m": 400, "east_m": 150, "surface_hint_m": 0},
+    {"id": "target-8", "site": "east parking roof", "kind": "roof", "north_m": 200, "east_m": 380, "surface_hint_m": 16},
+    {"id": "target-9", "site": "Las Vegas Boulevard far north", "kind": "road", "north_m": 420, "east_m": 0, "surface_hint_m": 0},
+    {"id": "target-10", "site": "far east rooftop", "kind": "roof", "north_m": -60, "east_m": 420, "surface_hint_m": 6},
+    {"id": "target-11", "site": "New York-New York roof", "kind": "roof", "north_m": -400, "east_m": -130, "surface_hint_m": 0},
+    {"id": "target-12", "site": "Park MGM podium roof", "kind": "roof", "north_m": -20, "east_m": -190, "surface_hint_m": 10},
+    {"id": "target-13", "site": "Las Vegas Boulevard south", "kind": "road", "north_m": -400, "east_m": 30, "surface_hint_m": 0},
+    {"id": "target-14", "site": "northwest deck", "kind": "roof", "north_m": 180, "east_m": -180, "surface_hint_m": 9},
+    {"id": "target-15", "site": "west service road", "kind": "road", "north_m": -30, "east_m": -420, "surface_hint_m": 0},
+    {"id": "target-16", "site": "southeast rooftop", "kind": "roof", "north_m": -100, "east_m": 250, "surface_hint_m": 19}
   ]
 }
