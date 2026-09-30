@@ -190,6 +190,7 @@ origin. The demo scripts give you something to look at:
 ./scripts/demo/four.sh              # mvp-four-mixed: opposing waypoints and orbits
 ./scripts/demo/twenty-spread.sh     # mvp-twenty-mixed: twenty orbits across the map
 ./scripts/demo/twenty-converge.sh   # mvp-twenty-mixed: pull it back in
+./scripts/demo/park-mgm-cesium-10.sh # park-mgm-cesium-10: spread ten synthetic nodes
 ```
 
 Each demo defaults to the scenario it was written for. To drive a synthetic
